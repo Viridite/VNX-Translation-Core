@@ -96,41 +96,128 @@ static void udWrite(FILE* f, char t, const std::string& k, const void* v, uint32
     fwrite(&vlen, 4, 1, f);
     fwrite(v, 1, vlen, f);
 }
-void jniUserDefaultsSave(bool force) {
-    StoreLock sl;
-    if (g_ud_path.empty() || !g_ud_dirty) return;
-    // The game calls UserDefault.flush() after each init phase (masteries,
-    // event assets, IAP, ...) — on a fresh save that's several flushes within
-    // a few seconds, and each one was re-serializing + rewriting the ENTIRE
-    // store (thousands of keys) to the SD card, real disk I/O completely
-    // independent of CPU clock speed. Collapse bursts to one real write every
-    // 2s; the exit-time call passes force=true so the final state is never lost.
-    static uint64_t s_lastSaveTick = 0;
-    if (!force && s_lastSaveTick != 0) {
-        uint64_t now = armGetSystemTick();
-        uint64_t elapsedMs = (now - s_lastSaveTick) * 1000 / armGetSystemTickFreq();
-        if (elapsedMs < 2000) return;  // stays dirty — a later call will flush it
-    }
-    std::string tmp = g_ud_path + ".tmp";
+
+// A snapshot of the store at the moment a save was triggered — cheap map
+// copies, taken under g_store_lock. The actual disk write (fopen/fwrite
+// loop over potentially thousands of keys/fclose/rename) then happens
+// against this private copy on a background thread, with no lock held, so
+// concurrent UserDefault.set*() calls from the game are never blocked by it
+// either.
+struct UdSnapshot {
+    std::unordered_map<std::string, int>         ints;
+    std::unordered_map<std::string, float>       floats;
+    std::unordered_map<std::string, std::string> strs;
+    std::string path;
+};
+
+static void udWriteSnapshot(const UdSnapshot& snap) {
+    std::string tmp = snap.path + ".tmp";
     FILE* f = fopen(tmp.c_str(), "wb");
     if (!f) { compatLogFmt("UserDefaults: save open FAIL %s", tmp.c_str()); return; }
-    for (auto& kv : g_int_store) {
+    for (auto& kv : snap.ints) {
         int32_t v = kv.second;
         udWrite(f, 'I', kv.first, &v, 4);
     }
-    for (auto& kv : g_float_store) {
+    for (auto& kv : snap.floats) {
         float v = kv.second;
         udWrite(f, 'F', kv.first, &v, 4);
     }
-    for (auto& kv : g_str_store)
+    for (auto& kv : snap.strs)
         udWrite(f, 'S', kv.first, kv.second.data(), (uint32_t)kv.second.size());
     fclose(f);
-    remove(g_ud_path.c_str());
-    rename(tmp.c_str(), g_ud_path.c_str());
-    g_ud_dirty = false;
-    s_lastSaveTick = armGetSystemTick();
+    remove(snap.path.c_str());
+    rename(tmp.c_str(), snap.path.c_str());
     compatLogFmt("UserDefaults: saved %zu ints, %zu floats, %zu strings",
-                 g_int_store.size(), g_float_store.size(), g_str_store.size());
+                 snap.ints.size(), snap.floats.size(), snap.strs.size());
+}
+
+// Background writer thread — confirmed on real hardware (Hill Climb Racing,
+// 2026-07-06 hardware report) that each debounced save was still costing
+// ~700-900ms of real SD card I/O *inline on whatever thread called
+// UserDefault.flush()* (almost always the main game thread), showing up as
+// a dozen-plus distinct ~800ms severe frame stalls spread across a single
+// session. The 2s debounce below already limited *how often* a save
+// happens; this moves the slow part off the calling thread entirely so a
+// due save no longer costs the caller a frame stall at all.
+static Thread  g_save_thread;
+static bool    g_save_thread_started = false;
+static Mutex   g_save_pending_lock;
+static CondVar g_save_pending_cv;
+static bool    g_save_pending = false;
+static UdSnapshot g_pending_snapshot;
+
+static void udSaveThreadFn(void*) {
+    for (;;) {
+        mutexLock(&g_save_pending_lock);
+        while (!g_save_pending) condvarWait(&g_save_pending_cv, &g_save_pending_lock);
+        UdSnapshot snap = std::move(g_pending_snapshot);
+        g_save_pending = false;
+        mutexUnlock(&g_save_pending_lock);
+        udWriteSnapshot(snap);
+    }
+}
+
+static bool ensureSaveThreadStarted() {
+    if (g_save_thread_started) return true;
+    condvarInit(&g_save_pending_cv);
+    // Small stack (just fopen/fwrite/rename, no game logic) and off the
+    // render core, same convention as the pthread_create shim's worker
+    // threads (see shim_table.cpp) — pinned to core 1, low-ish priority
+    // since a save being a frame or two late is invisible, a stalled
+    // render thread isn't.
+    Result rc = threadCreate(&g_save_thread, udSaveThreadFn, nullptr, nullptr,
+                             64 * 1024, 0x2C, 1);
+    if (R_SUCCEEDED(rc)) rc = threadStart(&g_save_thread);
+    if (R_FAILED(rc)) {
+        compatLogFmt("UserDefaults: background save thread failed 0x%x — saves will be synchronous", rc);
+        return false;
+    }
+    g_save_thread_started = true;
+    return true;
+}
+
+void jniUserDefaultsSave(bool force) {
+    UdSnapshot snap;
+    {
+        StoreLock sl;
+        if (g_ud_path.empty() || !g_ud_dirty) return;
+        // The game calls UserDefault.flush() after each init phase (masteries,
+        // event assets, IAP, ...) — on a fresh save that's several flushes
+        // within a few seconds. Collapse bursts to one real write every 2s;
+        // the exit-time call passes force=true so the final state is never
+        // lost.
+        static uint64_t s_lastSaveTick = 0;
+        if (!force && s_lastSaveTick != 0) {
+            uint64_t now = armGetSystemTick();
+            uint64_t elapsedMs = (now - s_lastSaveTick) * 1000 / armGetSystemTickFreq();
+            if (elapsedMs < 2000) return;  // stays dirty — a later call will flush it
+        }
+        snap.ints   = g_int_store;
+        snap.floats = g_float_store;
+        snap.strs   = g_str_store;
+        snap.path   = g_ud_path;
+        g_ud_dirty  = false;
+        s_lastSaveTick = armGetSystemTick();
+    }
+
+    if (force) {
+        // Exit-time save: the process is tearing down right after this, so
+        // it must be durable before we return — no background hand-off.
+        udWriteSnapshot(snap);
+        return;
+    }
+
+    if (!ensureSaveThreadStarted()) { udWriteSnapshot(snap); return; }  // fallback: save inline
+
+    mutexLock(&g_save_pending_lock);
+    // A snapshot that hasn't been picked up yet gets replaced outright — the
+    // newer state always supersedes it, and the debounce above already
+    // means this is rare (would need the writer thread to still be busy
+    // more than 2s after the previous save started).
+    g_pending_snapshot = std::move(snap);
+    g_save_pending = true;
+    condvarWakeOne(&g_save_pending_cv);
+    mutexUnlock(&g_save_pending_lock);
 }
 void jniUserDefaultsLoad(const char* path) {
     StoreLock sl;
