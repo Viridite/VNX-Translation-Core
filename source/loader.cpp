@@ -822,22 +822,6 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
 static volatile bool g_splash_active = true;
 void compatMarkSplashDone() { g_splash_active = false; }
 
-// See loader.h doc comment. Consumed once per frame in the game loop, which
-// sends a synthetic BACK key every kBackInjectPeriodFrames while this is > 0.
-static volatile int g_force_back_frames = 0;
-// A 2026-07-15 hardware test (compat-reports submission 2480fade) showed the
-// guard's own BACK spam causing the crash it exists to avoid: firing BACK
-// every single frame (60Hz) queues a second synthetic press while cocos2d-x
-// is still mid-transition popping the scene from the first, and the fault
-// landed in engine code within the same second the guard triggered — a race,
-// not the "known crash" this was written to dodge. Spacing presses out gives
-// each scene pop time to actually finish before the next one arrives.
-static constexpr int kBackInjectPeriodFrames = 15;  // ~250ms at 60fps
-void compatBlockShopEntry() {
-    g_force_back_frames = 90;  // ~1.5s at 60fps — 6 presses at the throttled rate below
-    compatLog("iap-guard: trackPage looked like Shop/IAP — forcing BACK for ~1.5s");
-}
-
 namespace {
 struct BrandOverlay {
     bool     ready   = false;
@@ -1490,11 +1474,6 @@ void runGameOnMainThread(void* game_so_ptr,
                     // B button → Android BACK key (cocos routes it to menus)
                     if (ev.type == SDL_JOYBUTTONDOWN && ev.jbutton.button == 1 /*B*/ && keyDown)
                         keyDown(env, obj, 4 /*AKEYCODE_BACK*/);
-                    // Shop guard active (see compatBlockShopEntry) — swallow
-                    // touch input entirely so a lingering finger-down from
-                    // the tap that opened Shop can't trigger anything else
-                    // while we're forcing our way back out.
-                    if (g_force_back_frames > 0) continue;
                     if (ev.type == SDL_FINGERDOWN && touchBegin)
                         touchBegin(env, obj, (jint)ev.tfinger.fingerId,
                                    ev.tfinger.x * 1280.0f, ev.tfinger.y * 720.0f);
@@ -1507,21 +1486,6 @@ void runGameOnMainThread(void* game_so_ptr,
                         FloatArr1 ys  = {1, {ev.tfinger.y * 720.0f}};
                         touchMove(env, obj, &ids, &xs, &ys);
                     }
-                }
-
-                // Shop guard: inject one synthetic BACK every
-                // kBackInjectPeriodFrames while active (not every frame —
-                // see kBackInjectPeriodFrames' comment above), giving the
-                // game's own navigation time to actually leave the Shop
-                // scene before the next press arrives. Decrement
-                // unconditionally — if keyDown were ever null, tying the
-                // countdown to a successful call would swallow touch input
-                // (see the `continue` above) forever instead of just for
-                // this one window.
-                if (g_force_back_frames > 0) {
-                    if (keyDown && (g_force_back_frames % kBackInjectPeriodFrames) == 0)
-                        keyDown(env, obj, 4 /*AKEYCODE_BACK*/);
-                    g_force_back_frames--;
                 }
 
                 nativeRender(env, obj);

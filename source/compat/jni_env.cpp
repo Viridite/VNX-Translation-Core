@@ -370,6 +370,20 @@ static jint s_CallStaticIntMethodV(JNIEnv*, jclass, jmethodID mid, va_list args)
         compatLogFmt("JNI %s() → %u", e->name, pct);
         return (jint)pct;
     }
+    // getMarketVariation() tells the game which store build it's running as —
+    // disassembly of libgame.so shows the Shop screen switches on it: 1/8 →
+    // Google Play shop layout, 5 → another store's, anything else → a path
+    // whose "is IAP available" gate is compiled as a literal `return false`,
+    // which skips populating the shop's item vector entirely. The Shop screen
+    // builder then reads items[size-1] of that empty vector — a load from
+    // address -8, the deterministic Shop/IAP crash at libgame.so+0x235bb8
+    // seen on hardware (compat-reports 2480fade + the 2026-07-16 retest).
+    // Our dummy 0 return was steering it into that dead path; claim the
+    // Google Play variation instead, matching the rest of this compat layer.
+    if (e && strcmp(e->name, "getMarketVariation") == 0) {
+        compatLog("JNI getMarketVariation() → 1 (Google Play)");
+        return 1;
+    }
     // SimpleAudioEngine: playEffect(path, loop, pitch, pan[, gain]) → effect id
     if (e && strcmp(e->name, "playEffect") == 0) {
         const char* p = (const char*)va_arg(args, jstring);
@@ -525,32 +539,19 @@ static void s_CallStaticVoidMethodV(JNIEnv*, jclass, jmethodID mid, va_list args
         }
         return;
     }
-    // trackPage(pageName) fires as the game enters a new screen. Any
-    // IAP/purchase-related screen has a confirmed, deterministic crash (same
-    // PC/offset on hardware every time, disassembly shows a generic inlined
-    // std::vector append reading a dangling reference — consistent with
-    // populating some product/offer list). First seen on the Shop screen
-    // itself, then again from a DIFFERENT page, "iap/playstore/view" — same
-    // exact crash, confirming it's the whole IAP surface, not just Shop.
-    // Can't fix without the game's source or a disassembler-level patch, so
-    // instead of guessing at each button's on-screen touch region, catch any
-    // page name that smells like IAP and force our way back out before the
-    // crash-prone code runs. jstring is literally a `const char*` in this
-    // JNI layer (see s_NewStringUTF), so the page name is directly readable
-    // without GetStringUTFChars.
+    // trackPage(pageName) fires as the game enters a new screen. An earlier
+    // iap-guard here injected synthetic BACK presses on any IAP-looking page
+    // name, trying to dodge the Shop crash — removed once the crash was
+    // actually root-caused: the Shop screen builder calls trackPage at its
+    // top and dereferences the empty shop-item vector in the SAME call
+    // stack, microseconds later, so no injected key press could ever arrive
+    // in time (proven by two hardware runs crashing identically with the
+    // guard active). The real fix is getMarketVariation above, which stops
+    // the item vector from being empty in the first place.
     if (strcmp(e->name, "trackPage") == 0) {
         const char* page = (const char*)va_arg(args, jstring);
         compatLogFmt("JNI trackPage(%s)", page ? page : "null");
         compatMarkPastLoading();
-        if (page) {
-            char lower[64]; size_t n = 0;
-            for (; page[n] && n < sizeof(lower) - 1; n++) lower[n] = (char)tolower((unsigned char)page[n]);
-            lower[n] = '\0';
-            if (strstr(lower, "shop") || strstr(lower, "iap") ||
-                strstr(lower, "playstore") || strstr(lower, "purchase") ||
-                strstr(lower, "store"))
-                compatBlockShopEntry();
-        }
         return;
     }
 
