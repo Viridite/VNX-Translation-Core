@@ -342,6 +342,16 @@ struct JavaObj {
 };
 static std::vector<JavaObj*> g_java_objs;  // few objects, leaked for process life
 
+// strdup isn't exposed under -std=c++17 (newlib hides POSIX extensions), so
+// roll our own. The result is handed back as a jstring (a char* in this layer);
+// GetStringUTFChars copies it, so the leak is bounded to a few config strings.
+static char* jdup(const char* s) {
+    if (!s) s = "";
+    size_t n = strlen(s) + 1;
+    char* p = (char*)malloc(n);
+    if (p) memcpy(p, s, n);
+    return p;
+}
 static jobject jmake(JCls c, const std::string& s = "") {
     JavaObj* o = new JavaObj();
     o->cls = c; o->str = s;
@@ -397,16 +407,16 @@ static jobject dispatchObjectMethod(jobject recv, MethodEntry* e, va_list args) 
         return recv;
     if (!strcmp(m, "getClassLoader"))      return jmake(JCls::Generic);
     if (!strcmp(m, "getPackageName") || !strcmp(m, "getPackageCodePath"))
-        return (jobject)strdup(packageName().c_str());
+        return (jobject)jdup(packageName().c_str());
     if (!strcmp(m, "getFilesDir") || !strcmp(m, "getCacheDir") ||
         !strcmp(m, "getExternalFilesDir") || !strcmp(m, "getExternalCacheDir") ||
         !strcmp(m, "getObbDir") || !strcmp(m, "getDataDir"))
         return jmake(JCls::File, dataDir());
     if (!strcmp(m, "getAbsolutePath") || !strcmp(m, "getPath") ||
         !strcmp(m, "getCanonicalPath"))
-        return (jobject)strdup(self ? self->str.c_str() : dataDir().c_str());
+        return (jobject)jdup(self ? self->str.c_str() : dataDir().c_str());
     if (!strcmp(m, "toString"))
-        return (jobject)strdup(self ? self->str.c_str() : "");
+        return (jobject)jdup(self ? self->str.c_str() : "");
 
     // AssetManager.open(String) → InputStream
     if (!strcmp(m, "open") || !strcmp(m, "openNonAssetFd") || !strcmp(m, "openFd")) {
@@ -421,9 +431,9 @@ static jobject dispatchObjectMethod(jobject recv, MethodEntry* e, va_list args) 
             std::string s((const char*)self->data.data() + self->pos,
                           self->data.size() - self->pos);
             self->pos = self->data.size();
-            return (jobject)strdup(s.c_str());
+            return (jobject)jdup(s.c_str());
         }
-        return (jobject)strdup("");
+        return (jobject)jdup("");
     }
 
     // Bundle getters return null (→ Unity falls back to its defaults).
