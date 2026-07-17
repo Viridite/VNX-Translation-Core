@@ -141,6 +141,23 @@ struct App {
     std::vector<Star> stars;
     float selAnimY = -1.0f;        // eased focus-card position (borealis-style)
 
+    // ── Boot animation (shown while a game loads) ───────────────────────
+    // Native port of animation/"Viridite Boot Animation.dc.html": the gem from
+    // viridite1.svg floating inside two counter-rotating arc rings, with a
+    // white sweep clipped to the gem, sparkles, and a tracked-caps caption.
+    SDL_Texture* gemTex    = nullptr;  // romfs:/viridite_gem.png (viridite1.svg)
+    SDL_Texture* bootBgTex = nullptr;  // radial-gradient backdrop
+    SDL_Texture* ringOutTex = nullptr; // outer arcs — spins forward
+    SDL_Texture* ringInTex  = nullptr; // inner arc  — spins reverse
+    SDL_Texture* gemFrame   = nullptr; // render target: gem + sweep, alpha-clipped
+    SDL_Texture* sweepTex   = nullptr; // white gradient band
+    TTF_Font*    fBootT = nullptr;     // 15px caps title
+    TTF_Font*    fBootS = nullptr;     // 13px caps status
+    TTF_Font*    fBootF = nullptr;     // 11px caps footer
+    bool         bootReady   = false;
+    std::string  launchTitle;          // game name shown under the gem
+    bool         showLogPanel = false; // Y toggles the compat_log feed back on
+
     // One-shot README screenshot flags (each screen captured once per run)
     bool shotMenu = false, shotLoading = false, shotResult = false, shotAbout = false;
 
@@ -254,6 +271,16 @@ struct App {
         if (avatarTex) SDL_DestroyTexture(avatarTex);
         if (bgTex) SDL_DestroyTexture(bgTex);
         for (auto* t : icons) if (t) SDL_DestroyTexture(t);
+        // Boot-animation assets
+        if (gemTex)     SDL_DestroyTexture(gemTex);
+        if (bootBgTex)  SDL_DestroyTexture(bootBgTex);
+        if (ringOutTex) SDL_DestroyTexture(ringOutTex);
+        if (ringInTex)  SDL_DestroyTexture(ringInTex);
+        if (gemFrame)   SDL_DestroyTexture(gemFrame);
+        if (sweepTex)   SDL_DestroyTexture(sweepTex);
+        if (fBootT && fBootT != fSm) TTF_CloseFont(fBootT);
+        if (fBootS && fBootS != fSm) TTF_CloseFont(fBootS);
+        if (fBootF && fBootF != fSm) TTF_CloseFont(fBootF);
         if (fBtn) TTF_CloseFont(fBtn);
         if (fLg)  TTF_CloseFont(fLg);
         if (fMd && fMd != fSm) TTF_CloseFont(fMd);
@@ -592,13 +619,214 @@ struct App {
     }
     static const int DETLOG_N = 28;
 
+    // ── Boot-animation assets ───────────────────────────────────────────
+    // Colours lifted straight from the .dc.html design.
+    static SDL_Color bootAccent()  { return {0,   168, 84,  255}; }  // #00A854
+    static SDL_Color bootTitle()   { return {0,   117, 63,  255}; }  // #00753F
+    static SDL_Color bootDot()     { return {105, 240, 174, 255}; }  // #69F0AE
+
+    // radial-gradient(ellipse 70% 60% at 50% 42%, #FFF, #F2FBF6 55%, #E4F5EC)
+    SDL_Texture* makeRadialBg() {
+        SDL_Surface* s = SDL_CreateRGBSurfaceWithFormat(0, SW, SH, 32, SDL_PIXELFORMAT_RGBA32);
+        if (!s) return nullptr;
+        const SDL_Color c0 = {255,255,255,255}, c1 = {242,251,246,255}, c2 = {228,245,236,255};
+        const float cx = SW * 0.50f, cy = SH * 0.42f, rx = SW * 0.70f, ry = SH * 0.60f;
+        for (int y = 0; y < SH; y++) {
+            Uint32* row = (Uint32*)((Uint8*)s->pixels + y * s->pitch);
+            for (int x = 0; x < SW; x++) {
+                float nx = (x + 0.5f - cx) / rx, ny = (y + 0.5f - cy) / ry;
+                float d  = sqrtf(nx * nx + ny * ny);
+                if (d > 1.0f) d = 1.0f;
+                SDL_Color c = (d < 0.55f) ? lerpCol(c0, c1, d / 0.55f)
+                                          : lerpCol(c1, c2, (d - 0.55f) / 0.45f);
+                row[x] = SDL_MapRGBA(s->format, c.r, c.g, c.b, 255);
+            }
+        }
+        SDL_Texture* t = SDL_CreateTextureFromSurface(rdr, s);
+        SDL_FreeSurface(s);
+        return t;
+    }
+
+    // An anti-aliased ring carrying one or more coloured arcs. Angles are in
+    // degrees, 0 = right and rising counter-clockwise, matching how CSS lays a
+    // border-<side>-color onto a circle (top = 45°..135°, right = 315°..45°).
+    struct Arc { float a0, a1; SDL_Color c; };
+    SDL_Texture* makeArcRing(int size, float radius, float thick,
+                             const std::vector<Arc>& arcs) {
+        SDL_Surface* s = SDL_CreateRGBSurfaceWithFormat(0, size, size, 32, SDL_PIXELFORMAT_RGBA32);
+        if (!s) return nullptr;
+        SDL_memset(s->pixels, 0, (size_t)s->h * s->pitch);
+        const float cx = size * 0.5f, cy = size * 0.5f;
+        for (int y = 0; y < size; y++) {
+            Uint32* row = (Uint32*)((Uint8*)s->pixels + y * s->pitch);
+            for (int x = 0; x < size; x++) {
+                float dx = x + 0.5f - cx, dy = y + 0.5f - cy;
+                float r  = sqrtf(dx * dx + dy * dy);
+                float cov = thick * 0.5f - fabsf(r - radius) + 0.5f;  // AA coverage
+                if (cov <= 0.0f) continue;
+                if (cov > 1.0f) cov = 1.0f;
+                float ang = atan2f(-dy, dx) * 180.0f / (float)M_PI;
+                if (ang < 0.0f) ang += 360.0f;
+                for (const Arc& a : arcs) {
+                    bool in = (a.a0 <= a.a1) ? (ang >= a.a0 && ang <= a.a1)
+                                             : (ang >= a.a0 || ang <= a.a1);  // wraps 0°
+                    if (!in) continue;
+                    row[x] = SDL_MapRGBA(s->format, a.c.r, a.c.g, a.c.b,
+                                         (Uint8)(a.c.a * cov));
+                    break;
+                }
+            }
+        }
+        SDL_Texture* t = SDL_CreateTextureFromSurface(rdr, s);
+        SDL_FreeSurface(s);
+        return t;
+    }
+
+    // Horizontal transparent→white→transparent band (the gem's shine sweep).
+    SDL_Texture* makeSweep(int w, int h) {
+        SDL_Surface* s = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_RGBA32);
+        if (!s) return nullptr;
+        for (int x = 0; x < w; x++) {
+            float t = w > 1 ? x / (float)(w - 1) : 0.0f;
+            float a = (t < 0.5f ? t / 0.5f : (1.0f - t) / 0.5f) * 0.75f;
+            Uint32 px = SDL_MapRGBA(s->format, 255, 255, 255, (Uint8)(a * 255));
+            for (int y = 0; y < h; y++)
+                ((Uint32*)((Uint8*)s->pixels + y * s->pitch))[x] = px;
+        }
+        SDL_Texture* t = SDL_CreateTextureFromSurface(rdr, s);
+        SDL_FreeSurface(s);
+        if (t) SDL_SetTextureBlendMode(t, SDL_BLENDMODE_ADD);
+        return t;
+    }
+
+    void buildBootAssets() {
+        if (bootReady) return;
+        bootReady = true;
+        romfsInit();
+        SDL_Surface* g = IMG_Load("romfs:/viridite_gem.png");
+        if (g) { gemTex = SDL_CreateTextureFromSurface(rdr, g); SDL_FreeSurface(g); }
+        else   { logSDL("boot: gem png load failed"); }
+
+        bootBgTex = makeRadialBg();
+        // Outer: strong top arc + faint right arc. Inner: soft bottom arc.
+        ringOutTex = makeArcRing(RING_TEX, 165.0f, 2.0f,
+                                 {{45.0f, 135.0f, {0, 168, 84, 217}},
+                                  {315.0f, 45.0f, {0, 168, 84, 38}}});
+        ringInTex  = makeArcRing(RING_TEX, 151.0f, 1.5f,
+                                 {{225.0f, 315.0f, {0, 200, 83, 89}}});
+        sweepTex   = makeSweep(57, GEM_PX);
+        gemFrame   = SDL_CreateTexture(rdr, SDL_PIXELFORMAT_RGBA8888,
+                                       SDL_TEXTUREACCESS_TARGET, GEM_PX, GEM_PX);
+        if (gemFrame) SDL_SetTextureBlendMode(gemFrame, SDL_BLENDMODE_BLEND);
+
+        fBootT = openFont(15);
+        fBootS = openFont(13);
+        fBootF = openFont(11);
+        if (!fBootT) fBootT = fSm;
+        if (!fBootS) fBootS = fSm;
+        if (!fBootF) fBootF = fSm;
+    }
+
+    // ── Tracked caps text (CSS letter-spacing) ──────────────────────────
+    // Splits on UTF-8 boundaries so non-ASCII game titles don't get mangled.
+    static std::vector<std::string> utf8Glyphs(const std::string& s) {
+        std::vector<std::string> out;
+        for (size_t i = 0; i < s.size();) {
+            unsigned char c = (unsigned char)s[i];
+            size_t n = (c < 0x80) ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : (c >> 3) == 0x1E ? 4 : 1;
+            if (i + n > s.size()) n = 1;
+            out.push_back(s.substr(i, n));
+            i += n;
+        }
+        return out;
+    }
+    int trackedWidth(TTF_Font* f, const std::string& s, int track) {
+        if (!f) return 0;
+        auto gl = utf8Glyphs(s);
+        int total = 0;
+        for (auto& g : gl) { int w = 0, h = 0; TTF_SizeUTF8(f, g.c_str(), &w, &h); total += w + track; }
+        return total > 0 ? total - track : 0;
+    }
+    void drawTrackedCentered(TTF_Font* f, const std::string& s, SDL_Color col,
+                             int cx, int y, int track) {
+        if (!f || s.empty()) return;
+        int x = cx - trackedWidth(f, s, track) / 2;
+        for (auto& g : utf8Glyphs(s)) {
+            if (g == " ") { int w = 0, h = 0; TTF_SizeUTF8(f, " ", &w, &h); x += w + track; continue; }
+            x += drawText(f, g, col, x, y) + track;
+        }
+    }
+    static std::string upperAscii(std::string s) {
+        for (char& c : s) c = (char)toupper((unsigned char)c);
+        return s;
+    }
+
+    // Layout, transcribed from the design's centred flex column.
+    static constexpr int GEM_PX   = 240;   // gem render size
+    static constexpr int RING_TEX = 340;   // ring texture (340×340 box)
+    static constexpr int BLOCK_Y  = 134;   // top of the gem box
+    static constexpr int GEM_CY   = BLOCK_Y + 170;
+    static constexpr int TITLE_Y  = BLOCK_Y + 340 + 36;
+    static constexpr int STAT_Y   = TITLE_Y + 37;
+    static constexpr int BAR_Y    = STAT_Y + 35;
+
     // ------------------------------------------------------------------
     // Progress screen — fully animated, called at ~60fps from main thread.
-    // Reads shared state written by the loader thread (g_ui_stage, g_ui_pct,
-    // g_ui_log, g_ui_head) plus live tails compat_log.txt for the log feed.
+    // Reads shared state written by the loader thread (g_ui_stage, g_ui_pct).
+    // Y toggles the old compat_log.txt feed back on for debugging.
+    // ------------------------------------------------------------------
+    // The old developer view: live compat_log.txt feed. The boot animation
+    // replaced it as the default, but a log-driven project shouldn't lose the
+    // ability to watch a stall happen — Y brings it back over the animation.
+    void drawLogPanel() {
+        const int LH = 21, N_SHOW = 13;
+        const int BOX_X = 30, BOX_W = SW - 60;
+        const int BOX_H = LH * (N_SHOW + 1) + 14;
+        const int y0 = SH - FOOTER_H - BOX_H - 16;
+
+        fill(BOX_X, y0, BOX_W, BOX_H, {247, 251, 249, 245});
+        fill(BOX_X, y0, BOX_W, LH + 4, {237, 244, 240, 250});
+        drawText(fSm, "  compat_log.txt", {120, 140, 225, 255}, BOX_X + 8, y0 + 3);
+        drawText(fSm, "Y: hide", C_DIM, BOX_X + BOX_W - 70, y0 + 3);
+
+        std::vector<std::string> logLines;
+        snapDetailLog(logLines, N_SHOW);
+
+        const SDL_Color C_LOG     = {125, 150, 230, 255};
+        const SDL_Color C_LOG_NEW = {40,  60,  90,  255};
+        const SDL_Color C_LOG_WARN= {176, 120, 0,   255};
+        const SDL_Color C_LOG_ERR = {214, 48,  79,  255};
+
+        int startIdx = (int)logLines.size() > N_SHOW ? (int)logLines.size() - N_SHOW : 0;
+        int liy = y0 + LH + 8;
+        for (int i = startIdx; i < (int)logLines.size(); i++) {
+            bool isLast = (i == (int)logLines.size() - 1);
+            const std::string& ln = logLines[i];
+            SDL_Color c = isLast ? C_LOG_NEW : C_LOG;
+            if (!isLast) {
+                if (ln.find("FAULT") != std::string::npos ||
+                    ln.find("fail")  != std::string::npos ||
+                    ln.find("ERR")   != std::string::npos)
+                    c = C_LOG_ERR;
+                else if (ln.find("WARN") != std::string::npos ||
+                         ln.find("warn") != std::string::npos)
+                    c = C_LOG_WARN;
+            }
+            drawText(fMd ? fMd : fSm,
+                     clamp(fMd ? fMd : fSm, (isLast ? "> " : "  ") + ln, BOX_W - 24),
+                     c, BOX_X + 10, liy);
+            liy += LH;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Progress screen — the Viridite boot animation, called at ~60fps from the
+    // main thread. Reads shared state written by the loader thread (g_ui_stage,
+    // g_ui_pct). Y toggles the compat_log.txt feed back on for debugging.
     // ------------------------------------------------------------------
     void showProgress() {
         Uint32 now = SDL_GetTicks();
+        buildBootAssets();
 
         // Track elapsed time per stage
         static char   s_stage[80] = {};
@@ -610,126 +838,99 @@ struct App {
         }
         Uint32 elapsed_s = (now - s_stage_t) / 1000;
 
-        // ── Background ──
-        drawBackground();
-        // Animated spinner in header (4-frame ASCII, cycles every 150ms)
-        static const char* SPINS[] = {"| Loading", "/ Loading", "- Loading", "\\ Loading"};
-        drawHeaderBar(SPINS[(now / 150) % 4]);
+        // ── Backdrop ──
+        if (bootBgTex) SDL_RenderCopy(rdr, bootBgTex, nullptr, nullptr);
+        else           fill(0, 0, SW, SH, C_BG);
 
-        int y = LIST_Y + 22;
+        // ── Counter-rotating rings (ringSpin 6s linear) ──
+        float spin = (now % 6000) / 6000.0f * 360.0f;
+        SDL_Rect ringDst = {SW / 2 - RING_TEX / 2, GEM_CY - RING_TEX / 2, RING_TEX, RING_TEX};
+        if (ringOutTex) SDL_RenderCopyEx(rdr, ringOutTex, nullptr, &ringDst,  spin, nullptr, SDL_FLIP_NONE);
+        if (ringInTex)  SDL_RenderCopyEx(rdr, ringInTex,  nullptr, &ringDst, -spin, nullptr, SDL_FLIP_NONE);
 
-        // ── Stage label with elapsed ──
-        std::string stLabel = g_ui_stage[0] ? std::string(g_ui_stage) : "Working...";
-        if (elapsed_s >= 2) {
-            char es[24];
-            snprintf(es, sizeof(es), "  (%us)", (unsigned)elapsed_s);
-            stLabel += es;
+        // ── Sparkles (0%/100% hidden, 50% full) ──
+        struct Spark { int cx, cy, r; SDL_Color c; float period, delay; };
+        static const Spark SPARKS[] = {
+            {754, 166, 4, {185, 246, 202, 255}, 2200.0f, 0.0f},
+            {511, 407, 3, {105, 240, 174, 255}, 2800.0f, 900.0f},
+            {496, 232, 2, {0,   200, 83,  255}, 3100.0f, 1600.0f},
+        };
+        for (const Spark& s : SPARKS) {
+            float ph = fmodf((float)now + s.period - s.delay, s.period) / s.period;
+            float k  = 0.5f - 0.5f * cosf(ph * 2.0f * (float)M_PI);
+            SDL_Color c = s.c; c.a = (Uint8)(255.0f * k);
+            fillCircle(s.cx, s.cy, (int)(s.r * (0.4f + 0.6f * k) + 0.5f), c);
         }
-        drawText(fLg, clamp(fLg, stLabel, SW - 80), C_WHITE, 40, y);
-        y += 46;
 
-        // ── Progress bar ──
-        const int BAR_X = 40, BAR_W = SW - 80, BAR_H = 18;
-        fill(BAR_X, y, BAR_W, BAR_H, {237, 244, 240, 255});
-        int fw = g_ui_pct > 0 ? BAR_W * g_ui_pct / 100 : 0;
-        if (fw > 0) fill(BAR_X, y, fw, BAR_H, {45, 205, 118, 255});
-        SDL_SetRenderDrawColor(rdr, 55, 55, 110, 255);
-        SDL_Rect bb = {BAR_X, y, BAR_W, BAR_H};
-        SDL_RenderDrawRect(rdr, &bb);
-        char pb[8]; snprintf(pb, sizeof(pb), "%d%%", g_ui_pct);
-        drawText(fSm, pb, C_DIM, BAR_X + BAR_W + 10, y + 1);
-        y += BAR_H + 10;
-
-        // ── Activity scan bar — sweeps left→right every 2s regardless of progress ──
-        const int SCAN_H = 8;
-        fill(BAR_X, y, BAR_W, SCAN_H, {242, 248, 245, 255});
-        // Bright highlight travels across the bar width in a 2s cycle
-        const int GLOW_W = 120;
-        int sweep = (int)((Uint64)(now % 2000) * (BAR_W + GLOW_W * 2) / 2000) - GLOW_W;
-        int sx0 = std::max(BAR_X, BAR_X + sweep);
-        int sx1 = std::min(BAR_X + BAR_W, BAR_X + sweep + GLOW_W);
-        if (sx1 > sx0)
-            fill(sx0, y, sx1 - sx0, SCAN_H, {90, 230, 160, 200});
-        // Brighter leading edge
-        if (sx1 > sx0) {
-            int edge = std::max(sx0, sx1 - 18);
-            fill(edge, y, sx1 - edge, SCAN_H, {200, 255, 225, 230});
-        }
-        y += SCAN_H + 16;
-
-        // ── Terminal log box ──
-        const int BOX_X  = 30;
-        const int BOX_W  = SW - 60;
-        const int LH     = 21;
-        const int N_SHOW = 13;   // visible log lines inside the box
-        const int BOX_H  = LH * (N_SHOW + 1) + 14; // +1 for title bar, +14 padding
-
-        fill(BOX_X, y, BOX_W, BOX_H, {247, 251, 249, 235});
-        // Title bar
-        fill(BOX_X, y, BOX_W, LH + 4, {237, 244, 240, 240});
-        drawText(fSm, "  compat_log.txt", {120, 140, 225, 255}, BOX_X + 8, y + 3);
-        // Pulsing dot to show file is being read live
-        Uint32 dotPhase = (now / 600) % 3;
-        std::string liveDots = std::string(dotPhase > 0 ? "." : " ")
-                             + std::string(dotPhase > 1 ? "." : " ")
-                             + std::string(dotPhase > 2 ? "." : " ");
-        drawText(fSm, "live" + liveDots, {53, 224, 162, 255}, BOX_X + BOX_W - 110, y + 3);
-        y += LH + 8;
-
-        // Log lines from in-memory detail buffer (written by every compatLog call)
-        std::vector<std::string> logLines;
-        snapDetailLog(logLines, N_SHOW);
-
-        const SDL_Color C_LOG      = {125, 150, 230, 255};
-        const SDL_Color C_LOG_NEW  = {225, 238, 255, 255};
-        const SDL_Color C_LOG_WARN = {220, 170, 60,  255};
-        const SDL_Color C_LOG_ERR  = {220, 100, 80,  255};
-
-        int startIdx = (int)logLines.size() > N_SHOW
-                       ? (int)logLines.size() - N_SHOW : 0;
-        int liy = y;
-        for (int i = startIdx; i < (int)logLines.size(); i++) {
-            bool isLast = (i == (int)logLines.size() - 1);
-            const std::string& ln = logLines[i];
-
-            SDL_Color c = isLast ? C_LOG_NEW : C_LOG;
-            // Colour-code errors/warnings (but newest line always stays bright)
-            if (!isLast) {
-                if (ln.find("FAULT") != std::string::npos ||
-                    ln.find("fail")  != std::string::npos ||
-                    ln.find("ERR")   != std::string::npos)
-                    c = C_LOG_ERR;
-                else if (ln.find("WARN") != std::string::npos ||
-                         ln.find("warn") != std::string::npos)
-                    c = C_LOG_WARN;
+        // ── Gem: float (gemFloat 3.4s) + shine sweep clipped to its silhouette ──
+        float fph   = (now % 3400) / 3400.0f;
+        float fk    = 0.5f - 0.5f * cosf(fph * 2.0f * (float)M_PI);
+        float lift  = -14.0f * fk;
+        float scale = 1.0f + 0.015f * fk;
+        if (gemTex && gemFrame) {
+            SDL_Texture* prev = SDL_GetRenderTarget(rdr);
+            SDL_SetRenderTarget(rdr, gemFrame);
+            SDL_SetRenderDrawColor(rdr, 0, 0, 0, 0);
+            SDL_RenderClear(rdr);
+            SDL_RenderCopy(rdr, gemTex, nullptr, nullptr);
+            // ADD leaves destination alpha untouched, so the band only lights up
+            // pixels the gem already covers — the render-target equivalent of the
+            // design's SVG clipPath.
+            if (sweepTex) {
+                float t = (now % 2800) / 2800.0f;
+                float p = t / 0.55f; if (p > 1.0f) p = 1.0f;
+                SDL_Rect sd = {(int)(-221.0f + p * 541.0f), 0, 57, GEM_PX};
+                SDL_RenderCopyEx(rdr, sweepTex, nullptr, &sd, -18.0, nullptr, SDL_FLIP_NONE);
             }
-
-            std::string pfx = isLast ? "> " : "  ";
-            drawText(fMd ? fMd : fSm,
-                     clamp(fMd ? fMd : fSm, pfx + ln, BOX_W - 24),
-                     c, BOX_X + 10, liy);
-            liy += LH;
-        }
-        y = liy + (N_SHOW - (int)(logLines.size() - startIdx)) * LH;
-        y += 14; // bottom padding of box
-
-        // ── "Still working" notice after 30s without stage change ──
-        if (elapsed_s >= 30) {
-            fill(30, y, SW - 60, 52, {253, 235, 238, 235});
-            char warnMsg[192];
-            snprintf(warnMsg, sizeof(warnMsg),
-                     "Still in '%.*s' for %us — normal for large libs.",
-                     48, s_stage, (unsigned)elapsed_s);
-            drawText(fSm, warnMsg, C_WARN, 42, y + 6);
-            drawText(fSm,
-                     "If the log above stopped updating, share compat_log.txt.",
-                     C_ERR, 42, y + 30);
-            y += 60;
+            SDL_SetRenderTarget(rdr, prev);
+            int gw = (int)(GEM_PX * scale + 0.5f);
+            SDL_Rect gd = {SW / 2 - gw / 2, (int)(GEM_CY - gw / 2 + lift + 0.5f), gw, gw};
+            SDL_RenderCopy(rdr, gemFrame, nullptr, &gd);
         }
 
-        drawFooterBar({}, "Please wait — sdmc:/Viridite/compat_log.txt");
+        // ── Caption: game title over stage text + blinking dots ──
+        drawTrackedCentered(fBootT,
+                            launchTitle.empty() ? "NOW LOADING" : upperAscii(launchTitle),
+                            bootTitle(), SW / 2, TITLE_Y, 6);
 
-        if (!shotLoading && g_ui_pct >= 40) {  // mid-load with a lively log box
+        std::string status = g_ui_stage[0] ? upperAscii(g_ui_stage) : "READING GAME DATA";
+        if (elapsed_s >= 30) status += " — STILL WORKING";
+        const SDL_Color statCol = {0, 102, 51, 140};
+        int stW   = trackedWidth(fBootS, status, 4);
+        int dotsW = 3 * 5 + 2 * 5;
+        int rowX  = SW / 2 - (stW + 10 + dotsW) / 2;
+        drawTrackedCentered(fBootS, status, statCol, rowX + stW / 2, STAT_Y, 4);
+        for (int i = 0; i < 3; i++) {
+            float ph = fmodf((float)now + 1400.0f - i * 200.0f, 1400.0f) / 1400.0f;
+            float u  = ph < 0.4f ? ph / 0.4f : (ph < 0.8f ? (0.8f - ph) / 0.4f : 0.0f);
+            SDL_Color c = bootDot(); c.a = (Uint8)(255.0f * (0.25f + 0.75f * u));
+            fillCircle(rowX + stW + 12 + i * 10, STAT_Y + 8, 2, c);
+        }
+
+        // ── Progress bar (280×3) — real percentage when the loader reports one,
+        //    otherwise the design's indeterminate slider.
+        const int BW = 280, BX = SW / 2 - BW / 2;
+        const SDL_Color BAR_A = {0, 200, 83, 255}, BAR_B = {0, 117, 63, 255};
+        fill(BX, BAR_Y, BW, 3, {0, 168, 84, 38});
+        if (g_ui_pct > 0) {
+            int pct = g_ui_pct > 100 ? 100 : g_ui_pct;
+            int fw  = BW * pct / 100;
+            for (int i = 0; i < fw; i++)
+                fill(BX + i, BAR_Y, 1, 3, lerpCol(BAR_A, BAR_B, i / (float)BW));
+        } else {
+            const int SLW = (int)(BW * 0.35f);
+            int sx = (int)((now % 1600) / 1600.0f * (BW + SLW)) - SLW;
+            int x0 = std::max(BX, BX + sx), x1 = std::min(BX + BW, BX + sx + SLW);
+            for (int i = x0; i < x1; i++)
+                fill(i, BAR_Y, 1, 3, lerpCol(BAR_A, BAR_B, (i - x0) / (float)SLW));
+        }
+
+        // ── Footer wordmark ──
+        drawTrackedCentered(fBootF, "VIRIDITE", {0, 102, 51, 77}, SW / 2, SH - 48, 3);
+
+        if (showLogPanel) drawLogPanel();
+
+        if (!shotLoading && g_ui_pct >= 40) {  // mid-load, gem in frame
             shotLoading = true;
             saveScreenshot("ui_loading.png");
         }
@@ -744,6 +945,10 @@ struct App {
         std::string pkg = apk.packageName.empty() ? apk.filename : apk.packageName;
 
         // Detail log is in-memory — no cache to invalidate, always fresh
+
+        // The boot animation captions itself with the game being loaded
+        launchTitle = !apk.appName.empty() ? apk.appName
+                    : (!apk.packageName.empty() ? apk.packageName : apk.filename);
 
         // Set initial stage before thread starts so first frame looks right
         const char* verb = skipInstall ? "Launching (cached)" : "Installing + Launching";
@@ -775,6 +980,9 @@ struct App {
             while (SDL_PollEvent(&ev)) {
                 if (ev.type == SDL_QUIT) quitting = true;
                 if (ev.type == SDL_JOYBUTTONDOWN && ev.jbutton.button == BTN_PLUS) quitting = true;
+                // Y peeks at the live compat_log.txt feed behind the animation
+                if (ev.type == SDL_JOYBUTTONDOWN && ev.jbutton.button == BTN_Y)
+                    showLogPanel = !showLogPanel;
             }
             showProgress();
             SDL_Delay(16); // ~60fps
