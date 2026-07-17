@@ -35,20 +35,21 @@ static const int ITEM_H   = 108;
 static const int ICON_SZ  = 84;
 static const int VISIBLE  = LIST_H / ITEM_H;
 
-// Colors — matched to the app icon: deep-space indigo sky + horizon green planet
-static const SDL_Color C_BG     = {6,   20,  15,  255};   // space navy
-static const SDL_Color C_HEADER = {15,  42,  32,  255};   // icon sky indigo
-static const SDL_Color C_FOOTER = {5,   16,  12,  255};
-static const SDL_Color C_SEL    = {23,  64,  50,  255};   // indigo highlight
-static const SDL_Color C_DIV    = {36,  80,  67,  255};
-static const SDL_Color C_WHITE  = {255, 255, 255, 255};
-static const SDL_Color C_GRAY   = {157, 184, 171, 255};
-static const SDL_Color C_DIM    = {109, 138, 124, 255};
-static const SDL_Color C_OK     = {53,  224, 162, 255};   // planet-rim green
-static const SDL_Color C_ERR    = {255, 107, 127, 255};
-static const SDL_Color C_WARN   = {230, 190, 70,  255};
-static const SDL_Color C_INST   = {53,  224, 162, 255};
-static const SDL_Color C_RIM    = {53,  224, 162, 255};   // horizon accent line
+// Viridite light theme — white base with the logo's vivid green as the accent.
+// C_WHITE is the primary TEXT colour (dark on white); matches the launcher.
+static const SDL_Color C_BG     = {248, 251, 249, 255};  // near-white background
+static const SDL_Color C_HEADER = {255, 255, 255, 255};  // white surface
+static const SDL_Color C_FOOTER = {242, 248, 245, 255};  // light footer
+static const SDL_Color C_SEL    = {205, 244, 224, 255};  // light mint selection
+static const SDL_Color C_DIV    = {224, 234, 228, 255};  // light divider/border
+static const SDL_Color C_WHITE  = {17,  32,  24,  255};  // primary text (dark)
+static const SDL_Color C_GRAY   = {92,  112, 102, 255};  // secondary text
+static const SDL_Color C_DIM    = {142, 160, 150, 255};  // tertiary text
+static const SDL_Color C_OK     = {0,   170, 80,  255};  // accent (vivid green)
+static const SDL_Color C_ERR    = {214, 48,  79,  255};
+static const SDL_Color C_WARN   = {176, 120, 0,   255};
+static const SDL_Color C_INST   = {0,   170, 80,  255};
+static const SDL_Color C_RIM    = {0,   190, 90,  255};  // accent rim
 
 // ---------------------------------------------------------------------------
 static FILE* g_log = nullptr;
@@ -313,58 +314,37 @@ struct App {
     static constexpr int   PLANET_BUMP = 130;      // rim height above bottom edge
 
     void buildBackground() {
-        // Starfield layout (deterministic so it doesn't reshuffle per launch)
+        // Light theme: a scatter of faint green motes on the near-white ground
+        // (no dark sky/planet SVG). bgTex stays null so drawBackground fills C_BG.
         stars.clear();
         uint32_t rng = 0x5EED5EED;
         auto rnd = [&rng]() { rng = rng * 1664525u + 1013904223u; return rng >> 8; };
-        for (int i = 0; i < 110; i++) {
+        for (int i = 0; i < 60; i++) {
             Star s;
             s.x     = (float)(rnd() % SW);
-            s.y     = (float)(rnd() % (SH - PLANET_BUMP - 80));
-            s.sz    = (rnd() % 100 < 16) ? 2 : 1;
+            s.y     = (float)(rnd() % SH);
+            s.sz    = (rnd() % 100 < 22) ? 3 : 2;
             s.phase = (rnd() % 628) / 100.0f;
-            s.speed = 0.35f + (rnd() % 100) / 90.0f;
+            s.speed = 0.25f + (rnd() % 100) / 120.0f;
             stars.push_back(s);
         }
-
-        // Sky/planet/horizon glow is authored as a real SVG (romfs:/background.svg
-        // — sky gradient, huge off-screen planet ellipse, radial glow)
-        // instead of hand-coded scanline math for the same look — easier to
-        // art-direct in an actual vector tool. SDL2_image's own portlib
-        // already bundles nanosvg internally (confirmed the hard way: vendoring
-        // our own copy collided at link time with symbols already inside
-        // libSDL2_image.a), so IMG_Load() rasterizes it directly, same as any
-        // other image format this project already loads. The animated
-        // starfield stays separate, drawn fresh every frame in
-        // drawBackground() on top of this static texture.
-        SDL_Surface* svgSurf = IMG_Load("romfs:/background.svg");
-        if (!svgSurf) { logSDL("background.svg load failed — flat background"); return; }
-        bgTex = SDL_CreateTextureFromSurface(rdr, svgSurf);
-        SDL_FreeSurface(svgSurf);
-        if (!bgTex) logSDL("bg texture failed — flat background");
     }
 
     void drawBackground() {
         Uint32 now = SDL_GetTicks();
-        if (bgTex) SDL_RenderCopy(rdr, bgTex, nullptr, nullptr);
-        else       fill(0, 0, SW, SH, C_BG);
-        // Twinkling, slowly drifting stars
+        fill(0, 0, SW, SH, C_BG);
         for (auto& s : stars) {
             s.x -= 0.02f * s.speed;
             if (s.x < 0) s.x += SW;
             float tw = 0.5f + 0.5f * sinf(now / 1000.0f * s.speed * 6.2832f + s.phase);
-            Uint8 a  = (Uint8)(70 + 170 * tw);
-            fill((int)s.x, (int)s.y, s.sz, s.sz, {230, 235, 255, a});
-            if (s.sz > 1 && tw > 0.75f) {  // sparkle cross on bright big stars
-                fill((int)s.x - 2, (int)s.y, 6, 1, {230, 235, 255, (Uint8)(a / 3)});
-                fill((int)s.x, (int)s.y - 2, 1, 6, {230, 235, 255, (Uint8)(a / 3)});
-            }
+            Uint8 a  = (Uint8)(12 + 24 * tw);   // faint green motes on white
+            fill((int)s.x, (int)s.y, s.sz, s.sz, {0, 190, 110, a});
         }
     }
 
     // Shared translucent header: "Viridite" with green accent + rim line
     void drawHeaderBar(const std::string& rightText = "") {
-        fill(0, 0, SW, HEADER_H, {15, 42, 32, 205});
+        fill(0, 0, SW, HEADER_H, {255, 255, 255, 235});
         fill(0, HEADER_H - 3, SW, 3, C_RIM);
         int w = drawText(fLg, "Virid", C_WHITE, 30, (HEADER_H - 28) / 2);
         w += drawText(fLg, "ite", C_OK, 30 + w, (HEADER_H - 28) / 2);
@@ -381,7 +361,7 @@ struct App {
     // draw our own chip with the letter.
     void drawFooterBar(const std::vector<std::pair<std::string, std::string>>& hints,
                        const std::string& leftText = "") {
-        fill(0, SH - FOOTER_H, SW, FOOTER_H, {5, 16, 12, 225});
+        fill(0, SH - FOOTER_H, SW, FOOTER_H, {242, 248, 245, 235});
         fill(0, SH - FOOTER_H, SW, 2, C_RIM);
         int cy = SH - FOOTER_H / 2;
         if (!leftText.empty())
@@ -400,7 +380,7 @@ struct App {
                 drawText(fBtn, it->first, C_WHITE, x, cy - gh / 2);
             } else {                              // fallback chip
                 x -= 26;
-                fillCircle(x + 13, cy, 13, {23, 64, 50, 255});
+                fillCircle(x + 13, cy, 13, {205, 244, 224, 255});
                 std::string letter = it->first.size() > 1 ? "?" : it->first;
                 int gw = 0, gh = 0;
                 TTF_SizeUTF8(fSm, letter.c_str(), &gw, &gh);
@@ -511,15 +491,15 @@ struct App {
                 int cy2 = (int)selAnimY;
                 float pulse = 0.5f + 0.5f * sinf(now / 1000.0f * 2.6f);
                 SDL_Rect card = {12, cy2 + 4, SW - 24, ITEM_H - 8};
-                fill(card.x, card.y, card.w, card.h, {23, 64, 50, 235});
+                fill(card.x, card.y, card.w, card.h, {205, 244, 224, 235});
                 for (int g = 1; g <= 5; g++) {       // soft outer glow
                     Uint8 a = (Uint8)((60 - g * 10) * (0.55f + 0.45f * pulse));
-                    SDL_SetRenderDrawColor(rdr, 53, 224, 162, a);
+                    SDL_SetRenderDrawColor(rdr, 0, 200, 100, a);
                     SDL_Rect gr = {card.x - g, card.y - g,
                                    card.w + 2 * g, card.h + 2 * g};
                     SDL_RenderDrawRect(rdr, &gr);
                 }
-                SDL_SetRenderDrawColor(rdr, 53, 224, 162,
+                SDL_SetRenderDrawColor(rdr, 0, 200, 100,
                                        (Uint8)(160 + 95 * pulse));
                 SDL_RenderDrawRect(rdr, &card);      // crisp focus border
                 fill(card.x, card.y, 5, card.h, C_RIM);
@@ -548,7 +528,7 @@ struct App {
                     int bw = 0, bh = 0;
                     TTF_SizeUTF8(fSm, INST.c_str(), &bw, &bh);
                     int bx = SW - bw - 40;
-                    fill(bx - 6, iy + 14, bw + 12, bh, {13, 55, 42, 200});
+                    fill(bx - 6, iy + 14, bw + 12, bh, {205, 244, 224, 220});
                     drawText(fSm, INST, C_INST, bx, iy + 14);
                 }
 
@@ -563,7 +543,7 @@ struct App {
             if ((int)apks.size() > VISIBLE) {
                 int barH = LIST_H * VISIBLE / (int)apks.size();
                 int barY = LIST_Y + LIST_H * scroll / (int)apks.size();
-                fill(SW - 6, barY, 6, barH, {45, 110, 88, 200});
+                fill(SW - 6, barY, 6, barH, {150, 195, 172, 200});
             }
         }
 
@@ -576,7 +556,7 @@ struct App {
             const char* msg = noticeText.c_str();
             int w = 0, h = 0;
             TTF_SizeUTF8(fSm, msg, &w, &h);
-            fill((SW - w) / 2 - 16, SH - FOOTER_H - 44, w + 32, 34, {60, 18, 14, 235});
+            fill((SW - w) / 2 - 16, SH - FOOTER_H - 44, w + 32, 34, {253, 235, 238, 240});
             drawText(fSm, msg, C_WARN, (SW - w) / 2, SH - FOOTER_H - 36);
         }
 
@@ -650,7 +630,7 @@ struct App {
 
         // ── Progress bar ──
         const int BAR_X = 40, BAR_W = SW - 80, BAR_H = 18;
-        fill(BAR_X, y, BAR_W, BAR_H, {20, 18, 66, 255});
+        fill(BAR_X, y, BAR_W, BAR_H, {237, 244, 240, 255});
         int fw = g_ui_pct > 0 ? BAR_W * g_ui_pct / 100 : 0;
         if (fw > 0) fill(BAR_X, y, fw, BAR_H, {45, 205, 118, 255});
         SDL_SetRenderDrawColor(rdr, 55, 55, 110, 255);
@@ -662,7 +642,7 @@ struct App {
 
         // ── Activity scan bar — sweeps left→right every 2s regardless of progress ──
         const int SCAN_H = 8;
-        fill(BAR_X, y, BAR_W, SCAN_H, {10, 9, 38, 255});
+        fill(BAR_X, y, BAR_W, SCAN_H, {242, 248, 245, 255});
         // Bright highlight travels across the bar width in a 2s cycle
         const int GLOW_W = 120;
         int sweep = (int)((Uint64)(now % 2000) * (BAR_W + GLOW_W * 2) / 2000) - GLOW_W;
@@ -684,9 +664,9 @@ struct App {
         const int N_SHOW = 13;   // visible log lines inside the box
         const int BOX_H  = LH * (N_SHOW + 1) + 14; // +1 for title bar, +14 padding
 
-        fill(BOX_X, y, BOX_W, BOX_H, {7, 6, 26, 230});
+        fill(BOX_X, y, BOX_W, BOX_H, {247, 251, 249, 235});
         // Title bar
-        fill(BOX_X, y, BOX_W, LH + 4, {24, 22, 80, 240});
+        fill(BOX_X, y, BOX_W, LH + 4, {237, 244, 240, 240});
         drawText(fSm, "  compat_log.txt", {120, 140, 225, 255}, BOX_X + 8, y + 3);
         // Pulsing dot to show file is being read live
         Uint32 dotPhase = (now / 600) % 3;
@@ -735,7 +715,7 @@ struct App {
 
         // ── "Still working" notice after 30s without stage change ──
         if (elapsed_s >= 30) {
-            fill(30, y, SW - 60, 52, {38, 16, 10, 230});
+            fill(30, y, SW - 60, 52, {253, 235, 238, 235});
             char warnMsg[192];
             snprintf(warnMsg, sizeof(warnMsg),
                      "Still in '%.*s' for %us — normal for large libs.",
@@ -842,7 +822,7 @@ struct App {
             drawHeaderBar();
 
             // Translucent result panel so text reads over the starfield
-            fill(40, LIST_Y + 6, SW - 80, SH - LIST_Y - FOOTER_H - 12, {10, 9, 44, 215});
+            fill(40, LIST_Y + 6, SW - 80, SH - LIST_Y - FOOTER_H - 12, {247, 251, 249, 220});
             {
                 SDL_Rect panel = {40, LIST_Y + 6, SW - 80, SH - LIST_Y - FOOTER_H - 12};
                 SDL_SetRenderDrawColor(rdr, res.ok ? 52 : 235, res.ok ? 230 : 90,
