@@ -4,8 +4,11 @@
 // instruction set to reach them (log-driven).
 #include "arm32/arm32_internal.h"
 #include "compat/loader.h"
+#include <cstdio>
 
 namespace a32 {
+
+static constexpr uint32_t CPSR_T = 0x20;   // Thumb bit
 
 bool isElf32Arm(const char* path) {
     FILE* f = fopen(path, "rb");
@@ -24,7 +27,7 @@ static uint32_t callGuest(CpuState& c, uint32_t func, uint32_t a0=0, uint32_t a1
                           uint32_t a2=0, uint32_t a3=0) {
     c.r[0]=a0; c.r[1]=a1; c.r[2]=a2; c.r[3]=a3;
     c.r[14] = A32_RETURN_TRAP;
-    c.cpsr = (func & 1) ? (c.cpsr | C_T) : (c.cpsr & ~C_T);
+    c.cpsr = (func & 1) ? (c.cpsr | CPSR_T) : (c.cpsr & ~CPSR_T);
     c.r[15] = func & ~1u;
     c.halt = false;
     cpuRun(c);

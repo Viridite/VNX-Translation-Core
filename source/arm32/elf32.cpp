@@ -1,5 +1,7 @@
 // ELF32 (EM_ARM) loader: map PT_LOAD into the guest region, apply REL
 // relocations, and resolve imports to bridge sentinels.
+// NB: compat/loader.h #defines PT_*/DT_*/R_ARM_* for the ELF64 loader, so this
+// file uses its own A_-prefixed constants to avoid the macro collision.
 #include "arm32/arm32_internal.h"
 #include "compat/loader.h"
 #include <cstdio>
@@ -15,16 +17,16 @@ struct Dyn  { int32_t tag; uint32_t val; };
 struct Sym  { uint32_t name; uint32_t value, size; uint8_t info, other; uint16_t shndx; };
 struct Rel  { uint32_t offset, info; };
 
-enum { PT_LOAD = 1, PT_DYNAMIC = 2 };
-enum { DT_NULL=0, DT_HASH=4, DT_STRTAB=5, DT_SYMTAB=6, DT_RELA=7, DT_RELASZ=8,
-       DT_STRSZ=10, DT_SYMENT=11, DT_INIT=12, DT_REL=17, DT_RELSZ=18, DT_RELENT=19,
-       DT_PLTREL=20, DT_JMPREL=23, DT_PLTRELSZ=2, DT_INIT_ARRAY=25, DT_INIT_ARRAYSZ=27 };
-enum { R_ARM_ABS32=2, R_ARM_REL32=3, R_ARM_GLOB_DAT=21, R_ARM_JUMP_SLOT=22, R_ARM_RELATIVE=23 };
+enum {
+    A_PT_LOAD = 1, A_PT_DYNAMIC = 2,
+    A_DT_NULL = 0, A_DT_STRTAB = 5, A_DT_SYMTAB = 6, A_DT_REL = 17, A_DT_RELSZ = 18,
+    A_DT_PLTRELSZ = 2, A_DT_JMPREL = 23, A_DT_INIT = 12, A_DT_INIT_ARRAY = 25, A_DT_INIT_ARRAYSZ = 27,
+    A_R_ARM_ABS32 = 2, A_R_ARM_REL32 = 3, A_R_ARM_GLOB_DAT = 21, A_R_ARM_JUMP_SLOT = 22, A_R_ARM_RELATIVE = 23,
+};
 
 // Dynamic tables (guest-relative), kept for elf32Sym.
 static const Sym*  s_symtab = nullptr;
 static const char* s_strtab = nullptr;
-static uint32_t    s_symcnt = 0;
 static uint32_t    s_bias   = 0;
 
 static const char* symName(const Sym& s) { return s_strtab ? s_strtab + s.name : ""; }
@@ -47,11 +49,11 @@ static void applyRels(const Rel* rels, uint32_t count) {
         if (!guestValid(where_g, 4)) continue;
         uint32_t* where = (uint32_t*)toHost(where_g);
         switch (type) {
-            case R_ARM_RELATIVE:  *where += s_bias; break;
-            case R_ARM_ABS32:     *where += (s_symtab ? resolveSym(s_symtab[sidx]) : 0); break;
-            case R_ARM_GLOB_DAT:
-            case R_ARM_JUMP_SLOT: *where  = (s_symtab ? resolveSym(s_symtab[sidx]) : 0); break;
-            case R_ARM_REL32:     *where += (s_symtab ? resolveSym(s_symtab[sidx]) : 0) - where_g; break;
+            case A_R_ARM_RELATIVE:  *where += s_bias; break;
+            case A_R_ARM_ABS32:     *where += (s_symtab ? resolveSym(s_symtab[sidx]) : 0); break;
+            case A_R_ARM_GLOB_DAT:
+            case A_R_ARM_JUMP_SLOT: *where  = (s_symtab ? resolveSym(s_symtab[sidx]) : 0); break;
+            case A_R_ARM_REL32:     *where += (s_symtab ? resolveSym(s_symtab[sidx]) : 0) - where_g; break;
             default: break;
         }
     }
@@ -80,7 +82,7 @@ LoadedElf32 elf32Load(const char* host_path) {
 
     // 1) Map PT_LOAD segments.
     for (int i = 0; i < eh->phnum; i++) {
-        if (ph[i].type != PT_LOAD) continue;
+        if (ph[i].type != A_PT_LOAD) continue;
         uint32_t seg_g = bias + ph[i].vaddr;
         if (!guestValid(seg_g, ph[i].memsz)) { compatLogFmt("arm32: segment OOB vaddr=0x%x", ph[i].vaddr); free(file); return out; }
         memset(toHost(seg_g), 0, ph[i].memsz);
@@ -95,32 +97,29 @@ LoadedElf32 elf32Load(const char* host_path) {
     const Rel* rel = nullptr; uint32_t relsz = 0;
     const Rel* jmp = nullptr; uint32_t jmpsz = 0;
     for (int i = 0; i < eh->phnum; i++) {
-        if (ph[i].type != PT_DYNAMIC) continue;
+        if (ph[i].type != A_PT_DYNAMIC) continue;
         Dyn* dyn = (Dyn*)toHost(bias + ph[i].vaddr);
-        for (; dyn->tag != DT_NULL; dyn++) {
+        for (; dyn->tag != A_DT_NULL; dyn++) {
             switch (dyn->tag) {
-                case DT_SYMTAB: s_symtab = (const Sym*)toHost(bias + dyn->val); break;
-                case DT_STRTAB: s_strtab = (const char*)toHost(bias + dyn->val); break;
-                case DT_REL:    rel = (const Rel*)toHost(bias + dyn->val); break;
-                case DT_RELSZ:  relsz = dyn->val; break;
-                case DT_JMPREL: jmp = (const Rel*)toHost(bias + dyn->val); break;
-                case DT_PLTRELSZ: jmpsz = dyn->val; break;
-                case DT_INIT:   out.entry_init = bias + dyn->val; break;
-                case DT_INIT_ARRAY:   out.init_array = bias + dyn->val; break;
-                case DT_INIT_ARRAYSZ: out.init_count = dyn->val / 4; break;
+                case A_DT_SYMTAB: s_symtab = (const Sym*)toHost(bias + dyn->val); break;
+                case A_DT_STRTAB: s_strtab = (const char*)toHost(bias + dyn->val); break;
+                case A_DT_REL:    rel = (const Rel*)toHost(bias + dyn->val); break;
+                case A_DT_RELSZ:  relsz = dyn->val; break;
+                case A_DT_JMPREL: jmp = (const Rel*)toHost(bias + dyn->val); break;
+                case A_DT_PLTRELSZ: jmpsz = dyn->val; break;
+                case A_DT_INIT:   out.entry_init = bias + dyn->val; break;
+                case A_DT_INIT_ARRAY:   out.init_array = bias + dyn->val; break;
+                case A_DT_INIT_ARRAYSZ: out.init_count = dyn->val / 4; break;
                 default: break;
             }
         }
     }
-    // A rough symbol count from the string table span isn't reliable; use the
-    // hash table's nchain if present, else leave 0 (only used by elf32Sym scan).
-    s_symcnt = 0;
 
     // 3) Relocations.
     if (rel) applyRels(rel, relsz / sizeof(Rel));
     if (jmp) applyRels(jmp, jmpsz / sizeof(Rel));
 
-    // 4) Find JNI_OnLoad by scanning the dynsym (bounded by strtab start).
+    // 4) Find JNI_OnLoad by scanning the dynsym.
     out.jni_onload = elf32Sym("JNI_OnLoad");
 
     out.load_bias = bias;
