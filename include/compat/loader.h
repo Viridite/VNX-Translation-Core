@@ -284,6 +284,7 @@ void  compatAudioStopAllEffects();
 void  compatAudioPauseAllEffects();
 void  compatAudioResumeAllEffects();
 void  compatAudioSetEffectsVolume(float v);
+void  compatAudioMuteEffectsFor(int ms);
 float compatAudioGetMusicVolume();
 float compatAudioGetEffectsVolume();
 

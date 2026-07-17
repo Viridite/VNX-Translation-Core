@@ -778,6 +778,16 @@ static void s_CallStaticVoidMethodV(JNIEnv*, jclass, jmethodID mid, va_list args
         compatAudioPreloadMusic((const char*)va_arg(args, jstring));
         return;
     }
+    // enterInGame(): HCR fires this at the start of a stage, right before the
+    // vehicle drops onto the map. During that drop-in it revs the looping engine
+    // sound through a setEffectRate (pitch) sweep SDL_mixer can't do, so it plays
+    // as a loud broken drone. Silence effects across the drop-in; the engine's
+    // per-frame setEffectVolume restores real audio the instant the window ends.
+    if (strcmp(e->name, "enterInGame") == 0) {
+        compatLog("JNI enterInGame() → muting effects through the drop-in");
+        compatAudioMuteEffectsFor(2500);
+        return;
+    }
     if (strcmp(e->name, "stopBackgroundMusic") == 0)    { compatAudioStopMusic(); return; }
     if (strcmp(e->name, "pauseBackgroundMusic") == 0)   { compatAudioPauseMusic(); return; }
     if (strcmp(e->name, "resumeBackgroundMusic") == 0)  { compatAudioResumeMusic(); return; }

@@ -30,6 +30,14 @@ static float       g_fx_vol    = 1.0f;
 static std::unordered_map<std::string, Mix_Chunk*> g_chunks;
 static std::unordered_map<std::string, Mix_Music*> g_musicCache;
 
+// Effects-mute window (SDL ticks). While active, every effect channel is forced
+// silent — used to cover the "drop the vehicle onto the map" transition at the
+// start of a stage, where HCR revs the looping engine sound through a pitch/rate
+// sweep (setEffectRate) that SDL_mixer can't reproduce, so it comes out as a
+// loud, broken drone until gameplay actually begins.
+static Uint32 g_fx_mute_until = 0;
+static bool fxMuted() { return SDL_GetTicks() < g_fx_mute_until; }
+
 static bool ensureInit() {
     if (g_inited) return true;
     if (g_failed) return false;
@@ -154,7 +162,7 @@ int compatAudioPlayEffect(const char* p, bool loop, float gain) {
     if (!c) return -1;
     if (gain < 0) gain = 0; else if (gain > 1) gain = 1;
     int ch = Mix_PlayChannel(-1, c, loop ? -1 : 0);
-    if (ch >= 0) Mix_Volume(ch, (int)(g_fx_vol * gain * MIX_MAX_VOLUME));
+    if (ch >= 0) Mix_Volume(ch, fxMuted() ? 0 : (int)(g_fx_vol * gain * MIX_MAX_VOLUME));
     return ch;
 }
 
@@ -164,8 +172,24 @@ int compatAudioPlayEffect(const char* p, bool loop, float gain) {
 void compatAudioSetEffectVolume(int ch, float vol) {
     AudioLock al;
     if (!g_inited || ch < 0) return;
+    // During the stage-start window, hold the channel silent regardless of what
+    // the game asks for — it rides this every frame, so the real volume snaps
+    // back the moment the window ends.
+    if (fxMuted()) { Mix_Volume(ch, 0); return; }
     if (vol < 0) vol = 0; else if (vol > 1) vol = 1;
     Mix_Volume(ch, (int)(g_fx_vol * vol * MIX_MAX_VOLUME));
+}
+
+// Silence effect channels for the next `ms` milliseconds (extends, never
+// shortens, any window already in progress). Called at stage start. The engine
+// loop begins right after this, so the per-channel fxMuted() checks in
+// playEffect/setEffectVolume keep it silent without a blanket Mix_Volume(-1,0)
+// here — which could strand a loop the game never re-sets.
+void compatAudioMuteEffectsFor(int ms) {
+    AudioLock al;
+    if (ms <= 0) return;
+    Uint32 until = SDL_GetTicks() + (Uint32)ms;
+    if (until > g_fx_mute_until) g_fx_mute_until = until;
 }
 
 void compatAudioStopEffect(int ch)   { AudioLock al; if (g_inited && ch >= 0) Mix_HaltChannel(ch); }
