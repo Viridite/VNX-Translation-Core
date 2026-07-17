@@ -552,6 +552,18 @@ static jint s_CallStaticIntMethodV(JNIEnv*, jclass, jmethodID mid, va_list args)
         }
         return defval;
     }
+    // (key, defaultValue) -> int config lookups with no backend. Same rule as the
+    // String forms in s_CallStaticObjectMethodV: hand back the caller's in-app
+    // default rather than the generic 0 fall-through, which silently zeroed every
+    // remote-config tunable (counts, limits, feature gates).
+    if (e && (strcmp(e->name, "getFirebaseRemoteConfigInt") == 0 ||
+              strcmp(e->name, "getSettingInt") == 0)) {
+        const char* key = (const char*)va_arg(args, jstring);
+        jint defval     = va_arg(args, jint);
+        if (logOnce("IntVDef", e->name, key ? key : "?"))
+            compatLogFmt("JNI %s(%s) → caller default %d", e->name, key ? key : "?", (int)defval);
+        return defval;
+    }
     if (e && (strcmp(e->name, "getBatteryLevel") == 0 ||
               strcmp(e->name, "getBatteryPercentage") == 0 ||
               strcmp(e->name, "getBatteryPercent") == 0)) {
@@ -866,6 +878,38 @@ static jobject s_CallStaticObjectMethodV(JNIEnv*, jclass, jmethodID mid, va_list
         const char* data = (const char*)va_arg(args, jstring);
         // Return input unchanged — identity cipher so round-trips are consistent
         return (jobject)(data ? data : "");
+    }
+    // (key, defaultValue) -> String lookups with no backend behind them. Firebase
+    // Remote Config's documented offline behaviour is to hand back the in-app
+    // default, so returning "" (the old fall-through) silently emptied every
+    // config-driven list — HCR's SkinProvider map ends up with no skins, and its
+    // unchecked `lookup("jeep")` then returns null and faults the shop.
+    if (strcmp(e->name, "getFirebaseRemoteConfigString") == 0 ||
+        strcmp(e->name, "getSettingString") == 0) {
+        const char* key    = (const char*)va_arg(args, jstring);
+        const char* defval = (const char*)va_arg(args, jstring);
+        if (logOnce("ObjVDef", e->name, key ? key : "?"))
+            compatLogFmt("JNI %s(%s) → caller default \"%s\"", e->name,
+                         key ? key : "?", defval ? defval : "");
+        return (jobject)(defval ? defval : "");
+    }
+    // The game concatenates this onto its save/config paths; "" produced the
+    // empty-path fopen failures and libxml2's "failed to load external entity".
+    // Android's getFilesDir() has no trailing separator — callers add their own.
+    if (strcmp(e->name, "getFilesDirectory") == 0) {
+        static std::string files_dir;   // filled once; callers keep the c_str()
+        if (files_dir.empty()) {
+            files_dir = dataDir();
+            compatLogFmt("JNI getFilesDirectory() → %s", files_dir.c_str());
+        }
+        return (jobject)files_dir.c_str();
+    }
+    if (strcmp(e->name, "getDeviceLanguage") == 0 ||
+        strcmp(e->name, "getCurrentLanguage") == 0) {
+        return (jobject)"en";
+    }
+    if (strcmp(e->name, "getAndroidVersion") == 0) {
+        return (jobject)"9";
     }
     if (logOnce("ObjV", e->name, e->sig))
         compatLogFmt("JNI CallStaticObjectMethodV: %s %s → \"\"", e->name, e->sig);
