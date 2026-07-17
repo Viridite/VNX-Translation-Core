@@ -155,7 +155,7 @@ void compatLogFmt(const char* fmt, ...) {
 
 // Logged first, before anything else touches compat_log.txt — a compat
 // report reviewer needs to be able to confirm the log they're reading
-// actually came from the Android Horizon build (and CFW/firmware) the
+// actually came from the Verdite build (and CFW/firmware) the
 // submitter claims, not a stale or mismatched one. Firmware comes from the
 // "set" service (works under any CFW); Atmosphere's version specifically
 // is only resolvable via the Exosphere API version SPL config item, which
@@ -163,7 +163,7 @@ void compatLogFmt(const char* fmt, ...) {
 // just means "not Atmosphere, or couldn't tell," not a real error, so it's
 // logged as unknown rather than treated as a fault.
 static void logEnvironmentHeader() {
-    compatLogFmt("env: Android Horizon (Translation Core) build 0.1.%d", BUILD_NUMBER);
+    compatLogFmt("env: Verdite (Translation Core) build 0.1.%d", BUILD_NUMBER);
 
     Result rc = setsysInitialize();
     if (R_SUCCEEDED(rc)) {
@@ -578,7 +578,7 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
         result.errorStage  = "Checking environment";
         result.errorDetail = "This CFW/environment doesn't allow JIT code memory "
                               "(svcCreateCodeMemory/svcControlCodeMemory unavailable) — "
-                              "Android Horizon can't load game binaries here.";
+                              "Verdite can't load game binaries here.";
         if (g_compat_log) { logFlushDedup(); fclose(g_compat_log); g_compat_log = nullptr; }
         return result;
     }
@@ -832,7 +832,7 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
 }
 
 // ─── Branding overlay ─────────────────────────────────────────────────────────
-// Draws "Android Horizon vX.Y.Z" over the game's own loading screen — a small
+// Draws "Verdite vX.Y.Z" over the game's own loading screen — a small
 // GLES2 textured quad composited directly into the game's frame, right after
 // nativeRender() returns and before the buffer swap. We can't reuse the
 // game's own bitmap font without reverse-engineering its asset pipeline, so
@@ -1535,17 +1535,11 @@ void runGameOnMainThread(void* game_so_ptr,
 
                 nativeRender(env, obj);
 
-                // Android Horizon branding — gated purely on the pixel
-                // fingerprint now. splashScreenHasCompleted turned out to
-                // fire at ~8s, long before the actual "HILL CLIMB RACING /
-                // LOADING..." screen with the version text ever appears —
-                // gating on it (g_splash_active) meant the probe check got
-                // permanently disabled before the target screen was ever
-                // reached, so the overlay could never show. The 3-point
-                // fingerprint alone is specific enough to gate this safely
-                // for the whole session (real gameplay HUD looks nothing
-                // like a dark vignette + white bar at these exact points).
-                if (isOnLoadingScreen(frame)) drawBrandOverlay();
+                // (The in-game Verdite branding overlay that used to draw over
+                // the loading screen was removed by request — the launcher and
+                // its own splash already brand the session; stamping the game's
+                // own loading screen isn't wanted. initBrandOverlay/
+                // drawBrandOverlay are left defined but unused.)
 
                 // Milestone screenshots (frame 30/300/900) were removed —
                 // frame-stall logging (see kFrameStallMs below) caught this

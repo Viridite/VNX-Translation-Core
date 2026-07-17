@@ -234,7 +234,7 @@ void         compatLogFlush(void);
 void         compatLogRaw(const char* msg);
 
 // Called by jni_env.cpp when the game signals its own loading/splash screen
-// is done (splashScreenHasCompleted). Hides the Android Horizon branding
+// is done (splashScreenHasCompleted). Hides the Verdite branding
 // overlay drawn over the game's loading screen (see loader.cpp).
 void         compatMarkSplashDone();
 
