@@ -3,6 +3,7 @@
 #include "compat/sha256.h"
 #include "build_number.h"
 #include "unity/unity_runtime.h"   // VNX-Unity-Runtime submodule
+#include "arm32/arm32.h"           // ARM32 emulation layer (armeabi-v7a games)
 #include <switch.h>
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_image.h>
@@ -304,6 +305,16 @@ static bool extractApk(const std::string& apk_path, const std::string& dest_dir,
             if (cb) cb("Extracting APK", rel.c_str());
             extractEntry(zf, dest);
 
+        } else if (n.rfind("lib/armeabi-v7a/", 0) == 0 && n.size() > 16 &&
+                   n.back() != '/') {
+            // 32-bit libs go to lib32/ — used only when there's no arm64 build,
+            // in which case they run under the ARM32 emulation layer.
+            mkdirp(dest_dir + "/lib32/");
+            std::string rel  = n.substr(16);
+            std::string dest = dest_dir + "/lib32/" + rel;
+            compatLogFmt("extract lib32: %s", rel.c_str());
+            extractEntry(zf, dest);
+
         } else if (n.rfind("assets/", 0) == 0 && n.back() != '/') {
             std::string rel  = n.substr(7);
             std::string dest = dest_dir + "/assets/" + rel;
@@ -600,10 +611,9 @@ static bool extractXapk(const std::string& xapk_path, const std::string& dest_di
         std::string n = name;
         bool isApk = n.size() > 4 && n.compare(n.size() - 4, 4, ".apk") == 0 && n.back() != '/';
         if (isApk) {
-            if (n.find("config.armeabi") != std::string::npos ||
-                n.find("config.x86")     != std::string::npos) {
-                compatLogFmt("xapk: skip %s (non-arm64 split)", n.c_str());
-            } else {
+            if (n.find("config.x86") != std::string::npos) {
+                compatLogFmt("xapk: skip %s (x86 split)", n.c_str());
+            } else {   // arm64 split → lib/, armeabi split → lib32/ (both via extractApk)
                 compatLogFmt("xapk: unpack %s", n.c_str());
                 if (cb) cb("Installing XAPK", n.c_str());
                 if (extractEntry(zf, tmp) && extractApk(tmp, dest_dir, cb)) { any = true; done++; }
@@ -726,9 +736,23 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
     if (cb) cb("Finding libraries", "Scanning extracted libs...");
     auto all_sos = findAllSos(lib_dir);
     if (all_sos.empty()) {
-        compatLog("No arm64 .so found in APK");
+        // No arm64 build — fall back to the ARM32 emulation layer if the game
+        // shipped armeabi-v7a libs (extracted to lib32/).
+        auto sos32 = findAllSos(base_dir + "/lib32");
+        if (!sos32.empty()) {
+            const std::string& main32 = sos32.back().second;   // largest
+            compatLogFmt("engine: no arm64 — ARM32 emulation layer for %s", main32.c_str());
+            compatAudioSetAssetsDir(asset_dir.c_str());
+            int rc = a32::run(main32.c_str(), pkg_name.c_str());
+            compatLogFmt("arm32: run returned %d", rc);
+            result.ok = (rc == 0);
+            if (rc != 0) { result.errorStage = "ARM32 emulation"; result.errorDetail = "ARM32 layer stopped early — see compat_log.txt."; }
+            if (g_compat_log) { logFlushDedup(); fclose(g_compat_log); g_compat_log = nullptr; }
+            return result;
+        }
+        compatLog("No arm64 or armeabi-v7a .so found in APK");
         result.errorStage  = "Finding libraries";
-        result.errorDetail = "No arm64-v8a .so found — APK may not support this architecture.";
+        result.errorDetail = "No arm64-v8a or armeabi-v7a .so found — unsupported architecture.";
         if (g_compat_log) { logFlushDedup(); fclose(g_compat_log); g_compat_log = nullptr; }
         return result;
     }
