@@ -17,7 +17,7 @@ DATA		:=	data
 INCLUDES	:=	include unity-runtime/include
 ROMFS		:=	romfs
 
-APP_TITLE	:= AHNX Translation Core (x64)
+APP_TITLE	:= Viridite Translation Core
 APP_AUTHOR	:= aaronworld.uk
 # NACP version (shown by hbmenu): 0.1.<build number>. The build number is
 # bumped by the outer make before the inner make (which creates the .nacp)
