@@ -250,6 +250,22 @@ static bool memIsHeap(const void* p) {
     if (R_FAILED(svcQueryMemory(&mi, &pageinfo, (u64)p))) return false;
     return mi.type == MemType_Heap;
 }
+// A pointer that is in the heap page range (memIsHeap) can still be something
+// newlib never handed out: an interior pointer into a larger chunk, a slice out
+// of a memalign'd block, or a sub-allocation from a foreign allocator (il2cpp /
+// libgpg define their own operator new). Passing any of those to _free_r walks a
+// bogus chunk header and corrupts the free-list, which then faults on a *later*
+// free (observed: 155 Unity ctors crashing in _free_r+0x78's list insert on the
+// 1.6.234 Brain It On! build). newlib on aarch64 always returns pointers aligned
+// to MALLOC_ALIGNMENT (16) with a usable size that fits the heap, so anything
+// failing those cheap, zero-false-positive checks is provably not a real chunk —
+// leak it rather than corrupt the arena.
+static bool looksLikeNewlibChunk(void* p) {
+    if (((uintptr_t)p & 0xF) != 0) return false;          // newlib pointers are 16-aligned
+    size_t us = malloc_usable_size(p);                     // reads header; in-heap so fault-safe
+    if (us == 0 || us > (256u * 1024u * 1024u)) return false;
+    return true;
+}
 static void sh_free(void* p) {
     if (!p) return;
     if (!memIsHeap(p)) {
@@ -262,11 +278,24 @@ static void sh_free(void* p) {
         }
         return;
     }
+    if (!looksLikeNewlibChunk(p)) {
+        static int badc = 0;
+        if (badc < 40) {
+            badc++;
+            char where[256];
+            elfDescribePc((uint64_t)__builtin_return_address(0), where, sizeof(where));
+            const uint64_t* h = (const uint64_t*)p;
+            compatLogFmt("free: SKIP bad-chunk ptr %p align=%u usable=%zu hdr[-16]=0x%llx hdr[-8]=0x%llx from %s",
+                         p, (unsigned)((uintptr_t)p & 0xF), malloc_usable_size(p),
+                         (unsigned long long)h[-2], (unsigned long long)h[-1], where);
+        }
+        return;  // leak, but do not corrupt the newlib free-list
+    }
     free(p);
 }
 static void* sh_realloc(void* p, size_t n) {
-    if (p && !memIsHeap(p)) {
-        compatLogFmt("realloc: non-heap ptr %p — returning fresh block", p);
+    if (p && (!memIsHeap(p) || !looksLikeNewlibChunk(p))) {
+        compatLogFmt("realloc: unowned ptr %p — returning fresh block", p);
         return malloc(n);
     }
     return realloc(p, n);
