@@ -155,7 +155,7 @@ void compatLogFmt(const char* fmt, ...) {
 
 // Logged first, before anything else touches compat_log.txt — a compat
 // report reviewer needs to be able to confirm the log they're reading
-// actually came from the Verdite build (and CFW/firmware) the
+// actually came from the Viridite build (and CFW/firmware) the
 // submitter claims, not a stale or mismatched one. Firmware comes from the
 // "set" service (works under any CFW); Atmosphere's version specifically
 // is only resolvable via the Exosphere API version SPL config item, which
@@ -163,7 +163,7 @@ void compatLogFmt(const char* fmt, ...) {
 // just means "not Atmosphere, or couldn't tell," not a real error, so it's
 // logged as unknown rather than treated as a fault.
 static void logEnvironmentHeader() {
-    compatLogFmt("env: Verdite (Translation Core) build 0.1.%d", BUILD_NUMBER);
+    compatLogFmt("env: Viridite (Translation Core) build 0.1.%d", BUILD_NUMBER);
 
     Result rc = setsysInitialize();
     if (R_SUCCEEDED(rc)) {
@@ -578,7 +578,7 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
         result.errorStage  = "Checking environment";
         result.errorDetail = "This CFW/environment doesn't allow JIT code memory "
                               "(svcCreateCodeMemory/svcControlCodeMemory unavailable) — "
-                              "Verdite can't load game binaries here.";
+                              "Viridite can't load game binaries here.";
         if (g_compat_log) { logFlushDedup(); fclose(g_compat_log); g_compat_log = nullptr; }
         return result;
     }
@@ -832,7 +832,7 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
 }
 
 // ─── Branding overlay ─────────────────────────────────────────────────────────
-// Draws "Verdite vX.Y.Z" over the game's own loading screen — a small
+// Draws "Viridite vX.Y.Z" over the game's own loading screen — a small
 // GLES2 textured quad composited directly into the game's frame, right after
 // nativeRender() returns and before the buffer swap. We can't reuse the
 // game's own bitmap font without reverse-engineering its asset pipeline, so
@@ -1535,7 +1535,7 @@ void runGameOnMainThread(void* game_so_ptr,
 
                 nativeRender(env, obj);
 
-                // (The in-game Verdite branding overlay that used to draw over
+                // (The in-game Viridite branding overlay that used to draw over
                 // the loading screen was removed by request — the launcher and
                 // its own splash already brand the session; stamping the game's
                 // own loading screen isn't wanted. initBrandOverlay/

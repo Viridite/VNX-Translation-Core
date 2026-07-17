@@ -148,7 +148,7 @@ struct App {
     // binary"). Block relaunch until the app is restarted.
     bool   gameRanOnce = false;
     Uint32 noticeUntil = 0;
-    std::string noticeText = "One game session per launch for now — restart Verdite to play again";
+    std::string noticeText = "One game session per launch for now — restart Viridite to play again";
 
     // Save the composed frame (call just before SDL_RenderPresent) as a PNG in
     // sdmc:/AndroidHorizonNX/screenshots/ — showcase material for the README.
@@ -202,7 +202,7 @@ struct App {
     bool init() {
         mkdir("sdmc:/AndroidHorizonNX", 0777);
         logOpen();
-        logMsg("Verdite starting");
+        logMsg("Viridite starting");
         socketInitializeDefault();
 
         if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK) != 0) {
@@ -215,7 +215,7 @@ struct App {
             logSDL("TTF_Init failed"); logClose(); return false;
         }
 
-        win = SDL_CreateWindow("Verdite",
+        win = SDL_CreateWindow("Viridite",
             SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
             SW, SH, SDL_WINDOW_SHOWN);
         if (!win) { logSDL("CreateWindow failed"); logClose(); return false; }
@@ -362,11 +362,11 @@ struct App {
         }
     }
 
-    // Shared translucent header: "Verdite" with green accent + rim line
+    // Shared translucent header: "Viridite" with green accent + rim line
     void drawHeaderBar(const std::string& rightText = "") {
         fill(0, 0, SW, HEADER_H, {24, 22, 86, 205});
         fill(0, HEADER_H - 3, SW, 3, C_RIM);
-        int w = drawText(fLg, "Verd", C_WHITE, 30, (HEADER_H - 28) / 2);
+        int w = drawText(fLg, "Virid", C_WHITE, 30, (HEADER_H - 28) / 2);
         w += drawText(fLg, "ite", C_OK, 30 + w, (HEADER_H - 28) / 2);
         drawText(fSm, BUILD_VERSION, C_DIM, 30 + w + 14, (HEADER_H + 4) / 2);
         if (!rightText.empty()) {
@@ -962,7 +962,7 @@ struct App {
                 drawText(f, s, col, (SW - w) / 2, y);
                 y += h + 10;
             };
-            center(fLg, "Verdite", C_WHITE);
+            center(fLg, "Viridite", C_WHITE);
             center(fSm, BUILD_VERSION, C_DIM);
             center(fSm, "by aaronworld.uk", C_GRAY);
             y += 10;
@@ -1051,7 +1051,7 @@ int main(int argc, char** argv) {
             "This is the game-loading engine, not the launcher — it needs a "
             "package name to run.", C_GRAY, 30, LIST_Y + 76);
         app.drawText(app.fSm,
-            "Launch a game from the Verdite app list instead.",
+            "Launch a game from the Viridite app list instead.",
             C_GRAY, 30, LIST_Y + 104);
         app.drawFooterBar({{app.BG(app.GLYPH_PLUS, "+"), "Quit"}});
         SDL_RenderPresent(app.rdr);

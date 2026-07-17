@@ -1,6 +1,6 @@
 # AHNX Translation Core
 
-The game-loading engine half of **[Verdite](https://github.com/AndroidHorizon/AndroidHorizonNX)** — an Android NDK compatibility layer that runs a game's real Android `.so` binary natively on Nintendo Switch, instead of emulating anything. If you're looking for the app you actually launch on your Switch, that's the [AndroidHorizonNX launcher repo](https://github.com/AndroidHorizon/AndroidHorizonNX); this repo is the engine it hands off to.
+The game-loading engine half of **[Viridite](https://github.com/AndroidHorizon/AndroidHorizonNX)** — an Android NDK compatibility layer that runs a game's real Android `.so` binary natively on Nintendo Switch, instead of emulating anything. If you're looking for the app you actually launch on your Switch, that's the [AndroidHorizonNX launcher repo](https://github.com/AndroidHorizon/AndroidHorizonNX); this repo is the engine it hands off to.
 
 ## What lives here
 
@@ -40,7 +40,7 @@ See the [launcher repo's README](https://github.com/AndroidHorizon/AndroidHorizo
 
 ## License
 
-Licensed under the Verdite Free & Source-Available License v1.0 — see [LICENSE](LICENSE). Free to use, copy, modify, and share; selling this code or derivatives isn't permitted, forks must credit Aaronateataco and stay under this same license and publicly available.
+Licensed under the Viridite Free & Source-Available License v1.0 — see [LICENSE](LICENSE). Free to use, copy, modify, and share; selling this code or derivatives isn't permitted, forks must credit Aaronateataco and stay under this same license and publicly available.
 
 ## About
 
