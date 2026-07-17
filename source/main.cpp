@@ -19,6 +19,8 @@
 
 extern void compatLogFmt(const char* fmt, ...);
 
+static constexpr float PI_F = 3.14159265358979323846f;
+
 static const char* APK_DIR  = "sdmc:/Viridite/apks";
 static const char* LOG_FILE = "sdmc:/Viridite/log.txt";
 
@@ -665,7 +667,7 @@ struct App {
                 float cov = thick * 0.5f - fabsf(r - radius) + 0.5f;  // AA coverage
                 if (cov <= 0.0f) continue;
                 if (cov > 1.0f) cov = 1.0f;
-                float ang = atan2f(-dy, dx) * 180.0f / (float)M_PI;
+                float ang = atan2f(-dy, dx) * 180.0f / PI_F;
                 if (ang < 0.0f) ang += 360.0f;
                 for (const Arc& a : arcs) {
                     bool in = (a.a0 <= a.a1) ? (ang >= a.a0 && ang <= a.a1)
@@ -857,14 +859,14 @@ struct App {
         };
         for (const Spark& s : SPARKS) {
             float ph = fmodf((float)now + s.period - s.delay, s.period) / s.period;
-            float k  = 0.5f - 0.5f * cosf(ph * 2.0f * (float)M_PI);
+            float k  = 0.5f - 0.5f * cosf(ph * 2.0f * PI_F);
             SDL_Color c = s.c; c.a = (Uint8)(255.0f * k);
             fillCircle(s.cx, s.cy, (int)(s.r * (0.4f + 0.6f * k) + 0.5f), c);
         }
 
         // ── Gem: float (gemFloat 3.4s) + shine sweep clipped to its silhouette ──
         float fph   = (now % 3400) / 3400.0f;
-        float fk    = 0.5f - 0.5f * cosf(fph * 2.0f * (float)M_PI);
+        float fk    = 0.5f - 0.5f * cosf(fph * 2.0f * PI_F);
         float lift  = -14.0f * fk;
         float scale = 1.0f + 0.015f * fk;
         if (gemTex && gemFrame) {
