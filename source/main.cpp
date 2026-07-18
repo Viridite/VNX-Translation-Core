@@ -14,6 +14,7 @@
 
 #include "apk.h"
 #include "compat/loader.h"
+#include "arm32/arm32.h"
 #include "build_number.h"
 #include "avatar.h"
 
@@ -986,6 +987,9 @@ struct App {
                 if (ev.type == SDL_JOYBUTTONDOWN && ev.jbutton.button == BTN_Y)
                     showLogPanel = !showLogPanel;
             }
+            // If the user bails during an ARM32 run, stop the interpreter so the
+            // loader thread can exit instead of the app appearing to hang.
+            if (quitting) a32::requestAbort();
             showProgress();
             SDL_Delay(16); // ~60fps
         }

@@ -39,11 +39,26 @@ static bool dispatch(CpuState& c, const char* name, uint32_t& ret) {
     if (!strcmp(name, "memalign") || !strcmp(name, "aligned_alloc")) { ret = guestAlloc(arg(c,1)); return true; }
     if (!strcmp(name, "posix_memalign")) { uint32_t p = guestAlloc(arg(c,2)); if (arg(c,0)) *(uint32_t*)toHost(arg(c,0)) = p; ret = p ? 0 : 12; return true; }
 
-    // ── mem/str: translate pointer args, return values may be guest pointers ──
-    if (!strcmp(name, "memcpy"))  { memcpy(hptr(arg(c,0)), hptr(arg(c,1)), arg(c,2)); ret = arg(c,0); return true; }
-    if (!strcmp(name, "memmove")) { memmove(hptr(arg(c,0)), hptr(arg(c,1)), arg(c,2)); ret = arg(c,0); return true; }
-    if (!strcmp(name, "memset"))  { memset(hptr(arg(c,0)), (int)arg(c,1), arg(c,2)); ret = arg(c,0); return true; }
-    if (!strcmp(name, "memcmp"))  { ret = (uint32_t)memcmp(hptr(arg(c,0)), hptr(arg(c,1)), arg(c,2)); return true; }
+    // ── mem/str: translate pointer args, return values may be guest pointers.
+    //    Bounds-check every length against the guest region so a bad pointer or
+    //    size can never write into the Core's own host memory. ──
+    if (!strcmp(name, "memcpy") || !strcmp(name, "memmove")) {
+        uint32_t d=arg(c,0), s=arg(c,1), n=arg(c,2);
+        if (guestValid(d,n) && guestValid(s,n)) memmove(hptr(d), hptr(s), n);
+        else compatLogFmt("arm32: %s OOB d=0x%x s=0x%x n=0x%x — skipped", name, d, s, n);
+        ret = d; return true;
+    }
+    if (!strcmp(name, "memset")) {
+        uint32_t d=arg(c,0), n=arg(c,2);
+        if (guestValid(d,n)) memset(hptr(d), (int)arg(c,1), n);
+        else compatLogFmt("arm32: memset OOB d=0x%x n=0x%x — skipped", d, n);
+        ret = d; return true;
+    }
+    if (!strcmp(name, "memcmp")) {
+        uint32_t a=arg(c,0), b=arg(c,1), n=arg(c,2);
+        ret = (guestValid(a,n) && guestValid(b,n)) ? (uint32_t)memcmp(hptr(a), hptr(b), n) : 0;
+        return true;
+    }
     if (!strcmp(name, "strlen"))  { ret = (uint32_t)strlen(hstr(arg(c,0))); return true; }
     if (!strcmp(name, "strcmp"))  { ret = (uint32_t)strcmp(hstr(arg(c,0)), hstr(arg(c,1))); return true; }
     if (!strcmp(name, "strncmp")) { ret = (uint32_t)strncmp(hstr(arg(c,0)), hstr(arg(c,1)), arg(c,2)); return true; }

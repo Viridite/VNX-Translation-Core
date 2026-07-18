@@ -35,6 +35,10 @@ bool isElf32Arm(const char* path);
 // Returns 0 on clean exit, negative on setup failure. Logs via compatLog*.
 int run(const char* main_so_host_path, const char* pkg);
 
+// Ask a running interpreter to stop as soon as possible (UI thread → loader
+// thread). Safe to call any time; the interpreter also self-limits by time.
+void requestAbort();
+
 // Guest<->host address translation (valid only after the region is mapped).
 uint8_t* toHost(uint32_t guest);
 uint32_t toGuest(const void* host);

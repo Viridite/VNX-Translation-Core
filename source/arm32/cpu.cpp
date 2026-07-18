@@ -4,8 +4,15 @@
 // instructions to add next (the same log-driven method the shim table used).
 #include "arm32/arm32_internal.h"
 #include "compat/loader.h"
+#include <switch.h>
 
 namespace a32 {
+
+// Safety: the interpreter runs on the loader thread. A runaway loop (interpreter
+// bug or wild PC) must never wedge the console — bound it by both instruction
+// count and wall-clock time, and let the UI thread abort it.
+static volatile bool g_abort = false;
+void requestAbort() { g_abort = true; }
 
 // CPSR bit helpers.
 enum { C_N=1u<<31, C_Z=1u<<30, C_C=1u<<29, C_V=1u<<28, C_T=1u<<5 };
@@ -36,8 +43,15 @@ static bool condPass(CpuState& c, uint32_t cond) {
     }
 }
 
-static inline uint32_t rd32(uint32_t g){ return *(uint32_t*)toHost(g); }
-static inline void      wr32(uint32_t g, uint32_t v){ *(uint32_t*)toHost(g) = v; }
+// All guest memory access is bounds-checked so a wild pointer or stack can
+// never read/write the Core's own host memory (which could corrupt the system).
+// OOB reads return 0; OOB writes are dropped (both logged, rate-limited).
+static void memFault(const char* op, uint32_t g) {
+    static int n = 0;
+    if (n < 64) { n++; compatLogFmt("arm32: OOB %s at guest 0x%x — contained", op, g); }
+}
+static inline uint32_t rd32(uint32_t g){ if (!guestValid(g,4)) { memFault("rd32", g); return 0; } return *(uint32_t*)toHost(g); }
+static inline void      wr32(uint32_t g, uint32_t v){ if (!guestValid(g,4)) { memFault("wr32", g); return; } *(uint32_t*)toHost(g) = v; }
 
 // Barrel shifter for ARM data-processing operand2 (immediate-shift form).
 static uint32_t shiftImm(CpuState& c, uint32_t val, uint32_t type, uint32_t amt, bool setc, bool& carry) {
@@ -229,7 +243,11 @@ static void stepThumb(CpuState& c) {
 }
 
 void cpuRun(CpuState& c) {
+    g_abort = false;
     uint64_t guard = 0;
+    const uint64_t t0 = armGetSystemTick();
+    const uint64_t kMaxNs = 12ull * 1000 * 1000 * 1000;   // 12s wall-clock ceiling
+
     while (!c.halt) {
         // Trap sentinel PCs → native bridge.
         if ((c.r[15] & 0xFFF00000) == (A32_SENTINEL_BASE & 0xFFF00000)) {
@@ -237,8 +255,26 @@ void cpuRun(CpuState& c) {
             continue;
         }
         if (c.r[15] == A32_RETURN_TRAP || c.r[15] == 0) break;   // guest fn returned
+
+        // PC must point at real guest code — never let a wild branch send the
+        // fetch into host memory outside the region (fetch reads toHost(pc)).
+        if (c.r[15] < 0x1000 || (uint64_t)c.r[15] + 4 > g_region) {
+            compatLogFmt("arm32: bad PC=0x%x — halt (protects the system)", c.r[15]);
+            c.halt = true; c.halt_pc = c.r[15]; break;
+        }
+
         if (c.cpsr & C_T) stepThumb(c); else stepArm(c);
-        if (++guard > 200000000ull) { compatLog("arm32: interpreter watchdog (200M insns) — stop"); break; }
+
+        // Periodic safety checks (cheap: once every 64k instructions).
+        if ((++guard & 0xFFFF) == 0) {
+            if (g_abort) { compatLog("arm32: aborted by UI — stop"); break; }
+            if (armTicksToNs(armGetSystemTick() - t0) > kMaxNs) {
+                compatLogFmt("arm32: %llus wall-clock watchdog — stop (pc=0x%x)",
+                             (unsigned long long)(kMaxNs/1000000000ull), c.r[15]);
+                break;
+            }
+        }
+        if (guard > 400000000ull) { compatLog("arm32: 400M-insn watchdog — stop"); break; }
     }
     if (c.halt) compatLogFmt("arm32: HALTED at pc=0x%x", c.halt_pc);
 }
