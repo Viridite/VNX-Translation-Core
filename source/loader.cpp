@@ -746,13 +746,16 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
         }
     }
 
-    // ── 2. Extract APK (skipped when already installed) ──────────────────────
+    // ── 2. Extract APK/XAPK (skipped when already installed) ─────────────────
     if (!already_installed) {
-        compatUiLog("Extracting APK...");
+        bool xapk = isXapk(apk_path);
+        compatUiLog(xapk ? "Extracting XAPK..." : "Extracting APK...");
         compatUiSetPct(2);
-        if (cb) cb("Installing APK", "Extracting libs and assets from APK...");
-        compatLog("Extracting APK...");
-        if (!extractApk(apk_path, base_dir, cb)) {
+        if (cb) cb(xapk ? "Installing XAPK" : "Installing APK", "Extracting libs and assets...");
+        compatLogFmt("Extracting %s...", xapk ? "XAPK" : "APK");
+        bool ok = xapk ? extractXapk(apk_path, base_dir, cb)
+                       : extractApk(apk_path, base_dir, cb);
+        if (!ok) {
             compatLog("Extraction failed");
             result.errorStage  = "Extracting APK";
             result.errorDetail = "Could not open or read the APK file.";
