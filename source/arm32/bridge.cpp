@@ -29,6 +29,25 @@ static inline uint32_t arg(CpuState& c, int i) {
 static inline char*  hstr(uint32_t g) { return g ? (char*)toHost(g) : nullptr; }
 static inline void*  hptr(uint32_t g) { return g ? (void*)toHost(g) : nullptr; }
 
+// strlen bounded to the region — never scans past the guest window.
+static uint32_t gStrlen(uint32_t g) {
+    if (!g || g >= g_region) return 0;
+    const char* p = (const char*)toHost(g);
+    uint32_t max = (uint32_t)(g_region - g), n = 0;
+    while (n < max && p[n]) n++;
+    return n;
+}
+// Bounded copy: at most `n` bytes, and never past the region for either side.
+static void gStrcpy(uint32_t d, uint32_t s, uint32_t n) {
+    if (!d || !s) return;
+    if (!guestValid(d, n) || !guestValid(s, n)) {
+        uint32_t dmax = d < g_region ? g_region - d : 0;
+        uint32_t smax = s < g_region ? g_region - s : 0;
+        n = n < dmax ? n : dmax; n = n < smax ? n : smax;
+    }
+    if (n) memcpy(toHost(d), toHost(s), n);
+}
+
 // Returns true if it handled `name`; sets ret (r0) via out.
 static bool dispatch(CpuState& c, const char* name, uint32_t& ret) {
     // ── allocator: must stay inside the guest region and return guest addrs ──
@@ -59,13 +78,20 @@ static bool dispatch(CpuState& c, const char* name, uint32_t& ret) {
         ret = (guestValid(a,n) && guestValid(b,n)) ? (uint32_t)memcmp(hptr(a), hptr(b), n) : 0;
         return true;
     }
-    if (!strcmp(name, "strlen"))  { ret = (uint32_t)strlen(hstr(arg(c,0))); return true; }
-    if (!strcmp(name, "strcmp"))  { ret = (uint32_t)strcmp(hstr(arg(c,0)), hstr(arg(c,1))); return true; }
-    if (!strcmp(name, "strncmp")) { ret = (uint32_t)strncmp(hstr(arg(c,0)), hstr(arg(c,1)), arg(c,2)); return true; }
-    if (!strcmp(name, "strcpy"))  { strcpy(hstr(arg(c,0)), hstr(arg(c,1))); ret = arg(c,0); return true; }
-    if (!strcmp(name, "strncpy")) { strncpy(hstr(arg(c,0)), hstr(arg(c,1)), arg(c,2)); ret = arg(c,0); return true; }
-    if (!strcmp(name, "strcat"))  { strcat(hstr(arg(c,0)), hstr(arg(c,1))); ret = arg(c,0); return true; }
-    if (!strcmp(name, "strchr"))  { char* p = strchr(hstr(arg(c,0)), (int)arg(c,1)); ret = p ? toGuest(p) : 0; return true; }
+    // String ops are bounded to the region so an unterminated guest string can't
+    // walk off into host memory (gStrlen caps its scan at the region end).
+    if (!strcmp(name, "strlen"))  { ret = gStrlen(arg(c,0)); return true; }
+    if (!strcmp(name, "strcmp") || !strcmp(name, "strncmp")) {
+        uint32_t a=arg(c,0), b=arg(c,1);
+        uint32_t n = name[3]=='n' ? arg(c,2) : gStrlen(a)+1;
+        if (!a || !b) ret = (a==b) ? 0 : 1;
+        else ret = (uint32_t)strncmp(hstr(a), hstr(b), n);
+        return true;
+    }
+    if (!strcmp(name, "strcpy"))  { gStrcpy(arg(c,0), arg(c,1), gStrlen(arg(c,1))+1); ret = arg(c,0); return true; }
+    if (!strcmp(name, "strncpy")) { gStrcpy(arg(c,0), arg(c,1), arg(c,2)); ret = arg(c,0); return true; }
+    if (!strcmp(name, "strcat"))  { uint32_t d=arg(c,0); gStrcpy(d + gStrlen(d), arg(c,1), gStrlen(arg(c,1))+1); ret = d; return true; }
+    if (!strcmp(name, "strchr"))  { uint32_t L=gStrlen(arg(c,0)); void* p = arg(c,0)?memchr(hptr(arg(c,0)), (int)arg(c,1), L+1):nullptr; ret = p ? toGuest(p) : 0; return true; }
 
     // ── C++ static-init / exit registration: safe no-ops here ──
     if (!strcmp(name, "__cxa_atexit") || !strcmp(name, "__cxa_finalize") ||

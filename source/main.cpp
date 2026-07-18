@@ -997,6 +997,26 @@ struct App {
         // Render a final frame so the last log line is visible
         showProgress();
 
+        // The loader thread must never wedge the console. If the user asked to
+        // quit and it doesn't wind down promptly (e.g. a hung native game-init
+        // that a fault-handler can't catch), force-exit the process — the OS
+        // reclaims the stuck thread and drops back to the home menu, instead of
+        // threadWaitForExit() blocking here forever.
+        if (quitting && !ctx.done.load(std::memory_order_acquire)) {
+            a32::requestAbort();
+            Uint32 t0 = SDL_GetTicks();
+            while (!ctx.done.load(std::memory_order_acquire)) {
+                if (SDL_GetTicks() - t0 > 15000) {
+                    compatLogFmt("loader still running 15s after quit — force-exiting to free the console");
+                    appletSetCpuBoostMode(ApmCpuBoostMode_Normal);
+                    exit(0);   // clean return to hbmenu (same path the game loop uses)
+                }
+                SDL_Event ev; while (SDL_PollEvent(&ev)) {}
+                showProgress();
+                SDL_Delay(16);
+            }
+        }
+
         threadWaitForExit(&t);
         threadClose(&t);
         g_loader_ctx = nullptr;
@@ -1006,9 +1026,10 @@ struct App {
         // starts. Always drop back to Normal here, even if loading failed.
         appletSetCpuBoostMode(ApmCpuBoostMode_Normal);
 
-        // If game loaded OK, run it here on the main thread (SDL2's EGL context
-        // is current on this thread, so GL calls reach the screen).
-        if (ctx.result.game_so) {
+        // If game loaded OK (and the user didn't cancel), run it here on the main
+        // thread (SDL2's EGL context is current on this thread, so GL calls reach
+        // the screen).
+        if (!quitting && ctx.result.game_so) {
             std::string base_dir = std::string("sdmc:/Viridite/games/") + pkg;
             runGameOnMainThread(ctx.result.game_so, win, ctx.apk_path, base_dir);
             gameRanOnce = true;
