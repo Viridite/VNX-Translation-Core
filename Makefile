@@ -116,8 +116,8 @@ $(BUILD):
 	@[ -d $@ ] || mkdir -p $@
 	@NEW=$$(( $$(cat $(CURDIR)/build_number.txt 2>/dev/null || echo 0) + 1 )); \
 	 echo $$NEW > $(CURDIR)/build_number.txt; \
-	 printf '#pragma once\n#define BUILD_NUMBER %d\n#define BUILD_VERSION "v0.1.%d testing-alpha"\n' $$NEW $$NEW \
-	   > $(CURDIR)/include/build_number.h
+	 printf '#pragma once\n#define BUILD_NUMBER %d\n#define BUILD_VERSION "v0.1.%d testing-alpha"\n#define VIRIDITE_VERSION "%s"\n' \
+	   $$NEW $$NEW "$${VIRIDITE_VERSION:-dev}" > $(CURDIR)/include/build_number.h
 	@rm -f $(CURDIR)/$(TARGET).nacp  # force regen so the NACP version tracks the build number
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
 

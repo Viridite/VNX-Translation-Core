@@ -165,7 +165,10 @@ void compatLogFmt(const char* fmt, ...) {
 // just means "not Atmosphere, or couldn't tell," not a real error, so it's
 // logged as unknown rather than treated as a fault.
 static void logEnvironmentHeader() {
-    compatLogFmt("env: Viridite (Translation Core) build 0.1.%d", BUILD_NUMBER);
+#ifndef VIRIDITE_VERSION
+#define VIRIDITE_VERSION "dev"
+#endif
+    compatLogFmt("env: Viridite (Translation Core) %s (build 0.1.%d)", VIRIDITE_VERSION, BUILD_NUMBER);
 
     Result rc = setsysInitialize();
     if (R_SUCCEEDED(rc)) {
