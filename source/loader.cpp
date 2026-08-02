@@ -1718,6 +1718,31 @@ void runGameOnMainThread(void* game_so_ptr,
                 ctrlKey(env, obj, m.akey, pressed ? JNI_TRUE : JNI_FALSE);
     };
 
+    // The launcher writes the chosen input mode to a marker file before
+    // chain-loading (same channel as .fps_cap). Docked it always says
+    // controller, since there's no touch screen to offer. Announcing a
+    // controller changes how the game reads input, so someone who picked touch
+    // must not get one registered behind their back.
+    bool wantController = true;
+    {
+        FILE* f = fopen("sdmc:/Viridite/.launch_input", "r");
+        if (f) {
+            char buf[32] = {0};
+            if (fgets(buf, sizeof buf, f)) {
+                if (strncmp(buf, "touch", 5) == 0) wantController = false;
+            }
+            fclose(f);
+        }
+        compatLogFmt("controller: launcher requested %s input",
+                     wantController ? "controller" : "touch");
+    }
+
+    if (ctrlConn && !wantController) {
+        compatLog("controller: touch mode chosen — not announcing a controller");
+        ctrlConn = nullptr;          // also re-enables the B->BACK fallback below
+        ctrlKey  = nullptr;
+    }
+
     if (ctrlConn) {
         // Announce a controller before the loop starts, so the game has one
         // registered by the time it reads input. Docked play depends on this:
