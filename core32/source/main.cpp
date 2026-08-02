@@ -1,4 +1,4 @@
-// AHNX-Translation-Core-x32 — placeholder.
+// Viridite-Translation-Core-x32 — placeholder.
 //
 // 32-bit (AArch32) Android game binaries aren't supported yet. Running them
 // natively on Switch is possible in principle (there's real prior art for
@@ -17,7 +17,7 @@ int main(int, char**) {
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK) != 0) return 1;
     if (TTF_Init() != 0) { SDL_Quit(); return 1; }
 
-    SDL_Window* win = SDL_CreateWindow("AHNX Translation Core (x32)",
+    SDL_Window* win = SDL_CreateWindow("Viridite Translation Core (x32)",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
         1280, 720, SDL_WINDOW_SHOWN);
     SDL_Renderer* rdr = win ? SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED) : nullptr;
@@ -32,7 +32,7 @@ int main(int, char**) {
     }
 
     static const char* LINES[] = {
-        "AHNX Translation Core (x32) — placeholder",
+        "Viridite Translation Core (x32) — placeholder",
         "",
         "32-bit binaries aren't supported at the moment.",
         "There isn't enough public documentation available to support",

@@ -1276,7 +1276,7 @@ struct App {
 // as the argv string, so the real argument lands at argv[1], same as any
 // normal argv[0]-is-the-program-path command line.
 // ---------------------------------------------------------------------------
-// This binary is the ENGINE half of a two-part split: the AHNX launcher
+// This binary is the ENGINE half of a two-part split: the Viridite launcher
 // (kept as a separate, smaller NRO — see launcher/) shows the app list and
 // chain-loads here via envSetNextLoad(path, argv) with a package name in
 // argv[1] — the same mechanism the earlier single-binary "forwarder mode"
@@ -1331,11 +1331,11 @@ int main(int argc, char** argv) {
         // Launched with no/unknown package — this binary isn't meant to be
         // run directly. Say so plainly instead of showing a blank screen.
         compatLogFmt("core-x64: no valid package argument (got '%s') — this binary "
-                     "is launched by the AHNX launcher, not directly",
+                     "is launched by the Viridite launcher, not directly",
                      wantPkg ? wantPkg : "(none)");
         app.drawBackground();
         app.drawHeaderBar();
-        app.drawText(app.fLg, "AHNX Translation Core (x64)", C_WHITE, 30, LIST_Y + 30);
+        app.drawText(app.fLg, "Viridite Translation Core (x64)", C_WHITE, 30, LIST_Y + 30);
         app.drawText(app.fSm,
             "This is the game-loading engine, not the launcher — it needs a "
             "package name to run.", C_GRAY, 30, LIST_Y + 76);

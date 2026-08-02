@@ -19,7 +19,7 @@ BUILD		:=	build
 SOURCES		:=	source
 INCLUDES	:=	include
 
-APP_TITLE	:= AHNX Translation Core (x32, placeholder)
+APP_TITLE	:= Viridite Translation Core (x32, placeholder)
 APP_AUTHOR	:= aaronworld.uk
 APP_VERSION	:= 0.1.$(shell cat $(TOPDIR)/../build_number.txt 2>/dev/null || echo 0)
 

@@ -288,7 +288,7 @@ void  compatAudioMuteEffectsFor(int ms);
 float compatAudioGetMusicVolume();
 float compatAudioGetEffectsVolume();
 
-// Extract APK libs+assets to sdmc:/AndroidHorizonNX/games/<pkg_name>/ and write
+// Extract APK libs+assets to sdmc:/Viridite/games/<pkg_name>/ and write
 // a .installed marker.  Returns false if the APK cannot be opened.
 // Safe to call even if already installed — just re-extracts.
 bool apkInstall(const std::string& apk_path,
