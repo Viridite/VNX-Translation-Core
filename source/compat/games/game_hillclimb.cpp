@@ -77,11 +77,21 @@ void patchSkinLookupGuard(uint8_t* base, uint64_t min_vaddr, size_t alloc_size) 
 // far=0x0 at +0x22c024 killing a session after a few minutes.
 //
 // The whole block is shop-item work that cannot succeed without a billing
-// backend, so it's branched over rather than guarded: turning 0x22c020 into
-// `b +0x14` skips the load, the vtable read and the call, landing on the
-// instruction that follows them.
+// backend, so it's branched over rather than guarded.
+//
+// The first version of this patched 0x22c020 (the element load) and hardware
+// showed it applied — yet the crash repeated at 0x22c024 with the branch
+// plainly present one instruction earlier:
+//   INSN: [pc-4]=14000005 [pc]=f9400008
+// So something reaches the dereference without passing through 0x22c020;
+// there is at least one more branch into this block than the disassembly
+// around it revealed. Patching the FAULTING instruction instead covers every
+// path into it, whether or not each one has been found — 0x22c024 becomes
+// `b +0x10`, skipping the vtable read and the call regardless of how it was
+// entered. 0x22c020 is left alone so the element load still behaves normally
+// for any path where it matters.
 void patchShopItemVirtualCall(uint8_t* base, uint64_t min_vaddr, size_t alloc_size) {
-    constexpr uint64_t site = 0x22c020;
+    constexpr uint64_t site = 0x22c020;      // signature anchor
     if (!inRange(site, min_vaddr, alloc_size)) return;
     uint32_t* at = (uint32_t*)(base + site);
     if (at[ 0] != 0xf9400100u ||   // ldr x0, [x8]
@@ -91,9 +101,9 @@ void patchShopItemVirtualCall(uint8_t* base, uint64_t min_vaddr, size_t alloc_si
         at[ 4] != 0xd63f0100u) {   // blr x8
         return;
     }
-    at[0] = 0x14000005u;           // b #+0x14 → 0x22c034, past the call
-    compatLog("quirk[HCR]: skipped empty-shop virtual call at +0x22c020 "
-              "(null vtable deref at +0x22c024; shop stays empty instead of crashing)");
+    at[1] = 0x14000004u;           // 0x22c024: b #+0x10 → 0x22c034, past the call
+    compatLog("quirk[HCR]: skipped empty-shop virtual call at +0x22c024 "
+              "(null vtable deref; branches over the call from every path)");
 }
 
 }  // namespace
