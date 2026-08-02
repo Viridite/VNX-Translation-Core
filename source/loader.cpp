@@ -1657,6 +1657,77 @@ void runGameOnMainThread(void* game_so_ptr,
     compatLogFmt("touch: begin=%p end=%p move=%p keyDown=%p",
                  (void*)touchBegin, (void*)touchEnd, (void*)touchMove, (void*)keyDown);
 
+    // ─── Controller input: Switch pad → the game's own MOGA controller path ──
+    // Hill Climb Racing ships real gamepad support (that's what its
+    // Moga_Pro_Guide asset is for) behind two natives the Java MainActivity
+    // would normally drive. Both signatures were read out of libgame.so rather
+    // than guessed, since calling a native with the wrong argument shape would
+    // fault:
+    //
+    //   onControllerConnectionEvent(env, thiz, jboolean connected, jint type)
+    //     tbz w2,#0      -> arg1 is the connected flag
+    //     sub w8,w3,#2 / cmp w8,#3 / b.hi ret
+    //                    -> arg2 must be 2..5 or the whole call is ignored,
+    //                       and it's stored as the active controller type
+    //
+    //   onControllerKeyEvent(env, thiz, jint keyCode, jboolean pressed)
+    //     mov w19,w2     -> arg1 is the key code
+    //     and w21,w3,#1  -> arg2 is the pressed flag
+    //
+    // The key handler branches on that stored type: type 4 decodes a
+    // media-remote-ish range (89..109), while 2/3/5 decode the layout we
+    // actually want — DPAD_UP..DPAD_CENTER (19..23), ENTER (66) and
+    // BUTTON_A..BUTTON_SELECT (96..109). Codes are plain Android KeyEvent
+    // values. 3 is used below simply because it lands in the non-4 group.
+    typedef void (*CtrlConn_fn)(JNIEnv*, jobject, jboolean, jint);
+    typedef void (*CtrlKey_fn)(JNIEnv*, jobject, jint, jboolean);
+    CtrlConn_fn ctrlConn = (CtrlConn_fn)so->findSym(
+        "Java_com_fingersoft_game_MainActivity_onControllerConnectionEvent");
+    CtrlKey_fn  ctrlKey  = (CtrlKey_fn)so->findSym(
+        "Java_com_fingersoft_game_MainActivity_onControllerKeyEvent");
+    compatLogFmt("controller: conn=%p key=%p", (void*)ctrlConn, (void*)ctrlKey);
+
+    // Android KeyEvent codes this build actually decodes. Everything else is
+    // routed to the jump table's default case and does nothing, so there's no
+    // point sending it.
+    enum : jint {
+        AKEY_DPAD_UP = 19, AKEY_DPAD_DOWN = 20, AKEY_DPAD_LEFT = 21,
+        AKEY_DPAD_RIGHT = 22, AKEY_DPAD_CENTER = 23,
+        AKEY_BUTTON_A = 96, AKEY_BUTTON_B = 97, AKEY_BUTTON_X = 99,
+        AKEY_BUTTON_Y = 100, AKEY_BUTTON_L1 = 102, AKEY_BUTTON_R1 = 103,
+        AKEY_BUTTON_L2 = 104, AKEY_BUTTON_R2 = 105, AKEY_BUTTON_START = 108,
+    };
+    // Switch pad (libnx/SDL button order) -> Android key. Gas and brake sit on
+    // the shoulders because HCR's own layout puts them there, and the face
+    // buttons stay available for menus. ZL/ZR duplicate L/R because the game
+    // decodes L1/L2 to one case and R1/R2 to another, so either shoulder works.
+    struct PadMap { int sdlButton; jint akey; };
+    static const PadMap PAD_MAP[] = {
+        {0,  AKEY_BUTTON_A},     {1,  AKEY_BUTTON_B},
+        {2,  AKEY_BUTTON_X},     {3,  AKEY_BUTTON_Y},
+        {6,  AKEY_BUTTON_L1},    {7,  AKEY_BUTTON_R1},   // L, R
+        {8,  AKEY_BUTTON_L2},    {9,  AKEY_BUTTON_R2},   // ZL, ZR
+        {10, AKEY_BUTTON_START},
+        {12, AKEY_DPAD_LEFT},    {13, AKEY_DPAD_UP},
+        {14, AKEY_DPAD_RIGHT},   {15, AKEY_DPAD_DOWN},
+    };
+    auto sendPadKey = [&](int sdlButton, bool pressed) {
+        if (!ctrlKey) return;
+        for (const auto& m : PAD_MAP)
+            if (m.sdlButton == sdlButton)
+                ctrlKey(env, obj, m.akey, pressed ? JNI_TRUE : JNI_FALSE);
+    };
+
+    if (ctrlConn) {
+        // Announce a controller before the loop starts, so the game has one
+        // registered by the time it reads input. Docked play depends on this:
+        // without it there's no touch screen and nothing else to drive.
+        ctrlConn(env, obj, JNI_TRUE, 3);
+        compatLog("controller: announced connected (type 3) — pad input enabled");
+    } else {
+        compatLog("controller: game exposes no controller natives — pad input unavailable");
+    }
+
     struct IntArr1   { jint len; jint   v[1]; };
     struct FloatArr1 { jint len; jfloat v[1]; };
 
@@ -1698,8 +1769,31 @@ void runGameOnMainThread(void* game_so_ptr,
                         g_in_recover = false;
                         goto game_loop_done;
                     }
-                    // B button → Android BACK key (cocos routes it to menus)
-                    if (ev.type == SDL_JOYBUTTONDOWN && ev.jbutton.button == 1 /*B*/ && keyDown)
+                    // Pad → the game's controller path. Sent before the BACK
+                    // shim below so B reaches the game as a real button when a
+                    // controller is registered, instead of only ever meaning
+                    // "back".
+                    if (ev.type == SDL_JOYBUTTONDOWN) sendPadKey(ev.jbutton.button, true);
+                    if (ev.type == SDL_JOYBUTTONUP)   sendPadKey(ev.jbutton.button, false);
+                    // Hat is the other spelling of the D-pad; SDL reports one
+                    // or the other depending on build, so both are handled.
+                    if (ev.type == SDL_JOYHATMOTION && ctrlKey) {
+                        static Uint8 prevHat = SDL_HAT_CENTERED;
+                        struct { Uint8 bit; jint key; } HAT[] = {
+                            {SDL_HAT_UP, AKEY_DPAD_UP},     {SDL_HAT_DOWN,  AKEY_DPAD_DOWN},
+                            {SDL_HAT_LEFT, AKEY_DPAD_LEFT}, {SDL_HAT_RIGHT, AKEY_DPAD_RIGHT},
+                        };
+                        for (const auto& h : HAT) {
+                            bool was = (prevHat & h.bit) != 0, now = (ev.jhat.value & h.bit) != 0;
+                            if (was != now) ctrlKey(env, obj, h.key, now ? JNI_TRUE : JNI_FALSE);
+                        }
+                        prevHat = ev.jhat.value;
+                    }
+                    // B button → Android BACK key (cocos routes it to menus).
+                    // Only when no controller is registered; otherwise B is a
+                    // real face button above.
+                    if (ev.type == SDL_JOYBUTTONDOWN && ev.jbutton.button == 1 /*B*/ &&
+                        keyDown && !ctrlConn)
                         keyDown(env, obj, 4 /*AKEYCODE_BACK*/);
                     if (ev.type == SDL_FINGERDOWN && touchBegin)
                         touchBegin(env, obj, (jint)ev.tfinger.fingerId,
