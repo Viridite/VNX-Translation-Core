@@ -301,3 +301,23 @@ LaunchResult launchApk(const std::string& apk_path,
                        const std::string& pkg_name,
                        ProgressCb         cb = nullptr,
                        bool               already_installed = false);
+
+// ─── Controller-guide labelling ─────────────────────────────────────────────
+// The controller diagram patched into a game's help screen can be annotated
+// with what each control actually does. Positions live per-diagram and
+// meanings live per-game (see guide_labels.cpp), so the two stay independent.
+
+struct SDL_Surface;   // avoids pulling SDL into every translation unit
+
+enum class GuideController { Pro, Handheld, JoyDual, JoyLeft, JoyRight };
+
+// Controls a diagram can point at. Face/DPad cover the whole cluster rather
+// than individual buttons, since that's the granularity a help image reads at.
+enum class GuideButton { L, R, DPad, Face, Plus };
+
+struct GuideLabel { GuideButton button; const char* text; };
+
+// Annotates `img` in place. No font, or a controller with no layout, simply
+// leaves the diagram unannotated rather than failing the patch.
+void guideDrawLabels(SDL_Surface* img, GuideController controller,
+                     const GuideLabel* labels, int labelCount);

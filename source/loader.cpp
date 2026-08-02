@@ -378,6 +378,32 @@ static bool extractApk(const std::string& apk_path, const std::string& dest_dir,
 // Which bundled controller diagram to patch in, from the launcher's
 // .launch_input marker. Falls back to the Pro Controller image, which is the
 // closest thing to a generic pad, when the marker is missing or unrecognised.
+// Diagram + layout for whatever the launcher said is in the player's hands.
+static GuideController guideControllerForInput() {
+    char buf[32] = {0};
+    FILE* f = fopen("sdmc:/Viridite/.launch_input", "r");
+    if (f) { if (!fgets(buf, sizeof buf, f)) buf[0] = 0; fclose(f); }
+    for (char* p = buf; *p; p++) if (*p == '\n' || *p == '\r') { *p = 0; break; }
+    if (!strcmp(buf, "handheld"))     return GuideController::Handheld;
+    if (!strcmp(buf, "joycon_dual"))  return GuideController::JoyDual;
+    if (!strcmp(buf, "joycon_left"))  return GuideController::JoyLeft;
+    if (!strcmp(buf, "joycon_right")) return GuideController::JoyRight;
+    return GuideController::Pro;
+}
+
+// What each control does in Hill Climb Racing. Read out of libgame.so rather
+// than assumed: the touch handler writes the same two bytes the shoulders do —
+// obj+1264 from the RIGHT of the screen and obj+1265 from the LEFT — and HCR
+// puts its gas pedal on the right, which is what pins R to gas and L to brake.
+// C, Z and both stick clicks are dropped by the game's own handler, so there's
+// nothing to label there.
+static const GuideLabel kHillClimbLabels[] = {
+    {GuideButton::R,    "Accelerate"},
+    {GuideButton::L,    "Brake / reverse"},
+    {GuideButton::Face, "Menus"},
+    {GuideButton::Plus, "Pause"},
+};
+
 static const char* guideForInput() {
     char buf[32] = {0};
     FILE* f = fopen("sdmc:/Viridite/.launch_input", "r");
@@ -459,6 +485,11 @@ static void applyGamePatches(const std::string& pkg_name, const std::string& ass
         if (scaled) {
             SDL_SetSurfaceBlendMode(repl, SDL_BLENDMODE_NONE);  // scale RGBA as-is, no alpha compositing
             SDL_BlitScaled(repl, nullptr, scaled, nullptr);
+            // Annotate AFTER the rescale so the text is rendered at final size
+            // and stays crisp, rather than being scaled along with the artwork.
+            guideDrawLabels(scaled, guideControllerForInput(),
+                            kHillClimbLabels,
+                            (int)(sizeof kHillClimbLabels / sizeof *kHillClimbLabels));
             if (IMG_SavePNG(scaled, target.c_str()) == 0)
                 compatLogFmt("patch: replaced %s (%dx%d, Switch controller layout)",
                              target.c_str(), origW, origH);
