@@ -62,6 +62,40 @@ void patchSkinLookupGuard(uint8_t* base, uint64_t min_vaddr, size_t alloc_size) 
               "(cbz x0 → +0x31358c; racing no longer crashes on a missing skin)");
 }
 
+// Quirk 3 — second Shop crash, further into the same builder.
+// Quirk 1 stops the product vector being populated from a store backend that
+// isn't there, but this site still walks that (now empty) vector and calls a
+// virtual method on whatever it finds:
+//   ldr x10,[x19,#1664] / ldr x9,[x19,#1656]   ; end, begin
+//   sub/asr #3/sub #1                          ; (count - 1)
+//   cmp x10,x8 / b.cs                          ; UNSIGNED bounds check
+//   ldr x0,[x8]   (0x22c020)                   ; element pointer
+//   ldr x8,[x0]   (0x22c024)                   ; ← vtable load, x0 is null
+//   ldr x8,[x8,#728] / blr x8                  ; virtual call
+// With the vector empty, count-1 underflows to 0xFFFF…, so the unsigned
+// compare passes and it reads past the end — hardware logs show exactly this,
+// far=0x0 at +0x22c024 killing a session after a few minutes.
+//
+// The whole block is shop-item work that cannot succeed without a billing
+// backend, so it's branched over rather than guarded: turning 0x22c020 into
+// `b +0x14` skips the load, the vtable read and the call, landing on the
+// instruction that follows them.
+void patchShopItemVirtualCall(uint8_t* base, uint64_t min_vaddr, size_t alloc_size) {
+    constexpr uint64_t site = 0x22c020;
+    if (!inRange(site, min_vaddr, alloc_size)) return;
+    uint32_t* at = (uint32_t*)(base + site);
+    if (at[ 0] != 0xf9400100u ||   // ldr x0, [x8]
+        at[ 1] != 0xf9400008u ||   // ldr x8, [x0]      ← the crashing load
+        at[ 2] != 0x52800021u ||   // mov w1, #1
+        at[ 3] != 0xf9416d08u ||   // ldr x8, [x8, #728]
+        at[ 4] != 0xd63f0100u) {   // blr x8
+        return;
+    }
+    at[0] = 0x14000005u;           // b #+0x14 → 0x22c034, past the call
+    compatLog("quirk[HCR]: skipped empty-shop virtual call at +0x22c020 "
+              "(null vtable deref at +0x22c024; shop stays empty instead of crashing)");
+}
+
 }  // namespace
 
 // ─── Registry entry points ──────────────────────────────────────────────────
@@ -75,6 +109,7 @@ void gameApplyQuirks(const char* pkg, const char* soname,
     if (isHcr && soname && strcmp(soname, kSoName) == 0) {
         patchShopPopulate(stage_base, min_vaddr, alloc_size);
         patchSkinLookupGuard(stage_base, min_vaddr, alloc_size);
+        patchShopItemVirtualCall(stage_base, min_vaddr, alloc_size);
     }
 }
 
