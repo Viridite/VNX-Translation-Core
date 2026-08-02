@@ -375,10 +375,31 @@ static bool extractApk(const std::string& apk_path, const std::string& dest_dir,
 // dimensions the ORIGINAL file actually has (read from the file we're about
 // to replace) rather than a hardcoded guess, since the exact original
 // dimensions aren't known ahead of time.
+// Which bundled controller diagram to patch in, from the launcher's
+// .launch_input marker. Falls back to the Pro Controller image, which is the
+// closest thing to a generic pad, when the marker is missing or unrecognised.
+static const char* guideForInput() {
+    char buf[32] = {0};
+    FILE* f = fopen("sdmc:/Viridite/.launch_input", "r");
+    if (f) { if (!fgets(buf, sizeof buf, f)) buf[0] = 0; fclose(f); }
+    for (char* p = buf; *p; p++) if (*p == '\n' || *p == '\r') { *p = 0; break; }
+
+    if (!strcmp(buf, "handheld"))     return "romfs:/patches/controllers/ctrl_handheld.png";
+    if (!strcmp(buf, "joycon_dual"))  return "romfs:/patches/controllers/ctrl_joycon_dual.png";
+    if (!strcmp(buf, "joycon_left"))  return "romfs:/patches/controllers/ctrl_joycon_left.png";
+    if (!strcmp(buf, "joycon_right")) return "romfs:/patches/controllers/ctrl_joycon_right.png";
+    return "romfs:/patches/controllers/ctrl_pro.png";
+}
+
 struct AssetPatch { const char* filename; const char* romfsSrc; };
 static const AssetPatch kHillClimbPatches[] = {
-    {"Moga_Pro_Guide.png",    "romfs:/patches/hillclimb/moga_pro_guide.png"},
-    {"Moga_Pocket_Guide.png", "romfs:/patches/hillclimb/moga_pocket_guide.png"},
+    // Both guide slots get the SAME image — the one matching whatever
+    // controller was picked in the launcher. HCR decides between its Pro and
+    // Pocket guides by MOGA controller type, which has no bearing on what's
+    // actually attached to a Switch, so showing the same correct diagram for
+    // either is better than letting it pick a pad you aren't holding.
+    {"Moga_Pro_Guide.png",    nullptr},   // resolved at runtime, see guideForInput
+    {"Moga_Pocket_Guide.png", nullptr},
 };
 
 // Recursively search dir for a file matching `filename` (case-insensitive).
@@ -410,6 +431,8 @@ static std::string findFileRecursive(const std::string& dir, const std::string& 
 static void applyGamePatches(const std::string& pkg_name, const std::string& asset_dir) {
     if (pkg_name != "com.fingersoft.hillclimb") return;
     romfsInit();
+    const char* guideSrc = guideForInput();
+    compatLogFmt("patch: controller guide -> %s", guideSrc);
     for (const AssetPatch& patch : kHillClimbPatches) {
         std::string target = findFileRecursive(asset_dir, patch.filename);
         if (target.empty()) {
@@ -425,10 +448,10 @@ static void applyGamePatches(const std::string& pkg_name, const std::string& ass
         int origW = orig->w, origH = orig->h;
         SDL_FreeSurface(orig);
 
-        SDL_Surface* repl = IMG_Load(patch.romfsSrc);
+        SDL_Surface* repl = IMG_Load((patch.romfsSrc ? patch.romfsSrc : guideSrc));
         if (!repl) {
             compatLogFmt("patch: bundled replacement %s missing (%s) — skipped",
-                         patch.romfsSrc, IMG_GetError());
+                         (patch.romfsSrc ? patch.romfsSrc : guideSrc), IMG_GetError());
             continue;
         }
         SDL_Surface* scaled = SDL_CreateRGBSurfaceWithFormat(
