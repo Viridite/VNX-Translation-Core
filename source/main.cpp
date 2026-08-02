@@ -192,9 +192,9 @@ struct App {
     TTF_Font* openFont(int ptsize) {
         plInitialize(PlServiceType_User);
         PlFontData fd = {};
-        if (plGetSharedFontByType(&fd, PlSharedFontType_Standard) == 0 && fd.size > 8) {
+        if (plGetSharedFontByType(&fd, PlSharedFontType_Standard) == 0 && fd.size > 0) {
             SDL_RWops* rw = SDL_RWFromConstMem(
-                (const uint8_t*)fd.address + 8, (int)fd.size - 8);
+                fd.address, (int)fd.size);
             TTF_Font* f = TTF_OpenFontRW(rw, 1, ptsize);
             if (f) { logMsg("  font: system BFTTF"); return f; }
             logSDL("  BFTTF open failed");
@@ -210,9 +210,9 @@ struct App {
     // Returns nullptr on failure — callers fall back to plain-text hints.
     TTF_Font* openExtFont(int ptsize) {
         PlFontData fd = {};
-        if (plGetSharedFontByType(&fd, PlSharedFontType_NintendoExt) == 0 && fd.size > 8) {
+        if (plGetSharedFontByType(&fd, PlSharedFontType_NintendoExt) == 0 && fd.size > 0) {
             SDL_RWops* rw = SDL_RWFromConstMem(
-                (const uint8_t*)fd.address + 8, (int)fd.size - 8);
+                fd.address, (int)fd.size);
             TTF_Font* f = TTF_OpenFontRW(rw, 1, ptsize);
             if (f) { logMsg("  font: NintendoExt glyphs"); return f; }
         }

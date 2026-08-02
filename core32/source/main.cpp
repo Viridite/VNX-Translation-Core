@@ -26,8 +26,8 @@ int main(int, char**) {
     TTF_Font* font = nullptr;
     PlFontData fd = {};
     if (plInitialize(PlServiceType_User) == 0 &&
-        plGetSharedFontByType(&fd, PlSharedFontType_Standard) == 0 && fd.size > 8) {
-        SDL_RWops* rw = SDL_RWFromConstMem((const uint8_t*)fd.address + 8, (int)fd.size - 8);
+        plGetSharedFontByType(&fd, PlSharedFontType_Standard) == 0 && fd.size > 0) {
+        SDL_RWops* rw = SDL_RWFromConstMem(fd.address, (int)fd.size);
         font = TTF_OpenFontRW(rw, 1, 26);
     }
 
