@@ -1077,7 +1077,17 @@ struct App {
             }
         }
 
+        // Brain It On stopped dead here: the loader logged "loading complete"
+        // and "main/render thread tid=" never appeared, so the work finished
+        // and the thread itself never terminated — most likely something a
+        // faulted constructor left running or holding. These three lines make
+        // the difference between "stuck joining" and "stuck starting the game"
+        // visible in the log instead of inferable from an absence.
+        compatLog("loader: work finished, joining loader thread");
+        compatLogFlush();
         threadWaitForExit(&t);
+        compatLog("loader: thread joined");
+        compatLogFlush();
         threadClose(&t);
         g_loader_ctx = nullptr;
 
@@ -1091,6 +1101,8 @@ struct App {
         // the screen).
         if (!quitting && ctx.result.game_so) {
             std::string base_dir = std::string("sdmc:/Viridite/games/") + pkg;
+            compatLog("loader: handing off to the game on the main thread");
+            compatLogFlush();
             runGameOnMainThread(ctx.result.game_so, win, ctx.apk_path, base_dir);
             gameRanOnce = true;
         }
