@@ -36,6 +36,10 @@ static std::unordered_map<std::string, Mix_Music*> g_musicCache;
 // start of a stage, where HCR revs the looping engine sound through a pitch/rate
 // sweep (setEffectRate) that SDL_mixer can't reproduce, so it comes out as a
 // loud, broken drone until gameplay actually begins.
+// Fixed at init and never changed, so nothing needs to ask SDL_mixer how
+// many channels exist while holding a lock.
+static const int kChannels = 24;
+
 static Uint32 g_fx_mute_until = 0;
 static bool fxMuted() { return SDL_GetTicks() < g_fx_mute_until; }
 
@@ -53,7 +57,7 @@ static bool ensureInit() {
         g_failed = true;
         return false;
     }
-    Mix_AllocateChannels(24);
+    Mix_AllocateChannels(kChannels);
     compatLogFmt("audio: SDL_mixer ready (codecs=0x%x)", got);
     g_inited = true;
     return true;
@@ -224,7 +228,13 @@ void compatAudioSetEffectsVolume(float v) {
     // which set every channel to the global level and discarded the per-effect
     // gain — so one setEffectsVolume call made quiet effects as loud as loud
     // ones, and the engine loop jumped to full until the game next rode it.
-    for (int ch = 0; ch < Mix_AllocateChannels(-1); ch++) applyChannelVolume(ch);
+    // Channel count is the constant it was allocated with. It used to be
+    // Mix_AllocateChannels(-1) — in the loop CONDITION, so it re-entered
+    // SDL_mixer and took its audio lock on every iteration, 25 times per volume
+    // change, while this already holds AudioLock. That is a lock-ordering
+    // hazard against the audio callback in code every game runs, and volume
+    // changes are frequent.
+    for (int ch = 0; ch < kChannels; ch++) applyChannelVolume(ch);
 }
 
 float compatAudioGetMusicVolume()   { return g_music_vol; }
