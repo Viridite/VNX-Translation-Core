@@ -10,6 +10,7 @@
 #include <SDL2/SDL_mixer.h>
 #include <cstring>
 #include <string>
+#include <map>
 #include <unordered_map>
 
 extern void compatLog(const char* msg);
@@ -155,6 +156,20 @@ void compatAudioUnloadEffect(const char* p) {
     }
 }
 
+// Each channel's own gain, kept separately from the global effects volume so
+// the two can be combined instead of one overwriting the other. Without this,
+// a setEffectsVolume call flattened every playing effect to the global level
+// and threw away the per-effect gain — which is what made effects blare.
+static std::map<int, float> g_ch_gain;
+
+static void applyChannelVolume(int ch) {
+    if (ch < 0) return;
+    float gain = 1.0f;
+    auto it = g_ch_gain.find(ch);
+    if (it != g_ch_gain.end()) gain = it->second;
+    Mix_Volume(ch, fxMuted() ? 0 : (int)(g_fx_vol * gain * MIX_MAX_VOLUME));
+}
+
 int compatAudioPlayEffect(const char* p, bool loop, float gain) {
     AudioLock al;
     if (!ensureInit()) return -1;
@@ -162,7 +177,7 @@ int compatAudioPlayEffect(const char* p, bool loop, float gain) {
     if (!c) return -1;
     if (gain < 0) gain = 0; else if (gain > 1) gain = 1;
     int ch = Mix_PlayChannel(-1, c, loop ? -1 : 0);
-    if (ch >= 0) Mix_Volume(ch, fxMuted() ? 0 : (int)(g_fx_vol * gain * MIX_MAX_VOLUME));
+    if (ch >= 0) { g_ch_gain[ch] = gain; applyChannelVolume(ch); }
     return ch;
 }
 
@@ -175,9 +190,11 @@ void compatAudioSetEffectVolume(int ch, float vol) {
     // During the stage-start window, hold the channel silent regardless of what
     // the game asks for — it rides this every frame, so the real volume snaps
     // back the moment the window ends.
-    if (fxMuted()) { Mix_Volume(ch, 0); return; }
     if (vol < 0) vol = 0; else if (vol > 1) vol = 1;
-    Mix_Volume(ch, (int)(g_fx_vol * vol * MIX_MAX_VOLUME));
+    // Remember it even while muted, so the real level is restored when the
+    // stage-start window ends rather than being lost.
+    g_ch_gain[ch] = vol;
+    applyChannelVolume(ch);
 }
 
 // Silence effect channels for the next `ms` milliseconds (extends, never
@@ -192,17 +209,22 @@ void compatAudioMuteEffectsFor(int ms) {
     if (until > g_fx_mute_until) g_fx_mute_until = until;
 }
 
-void compatAudioStopEffect(int ch)   { AudioLock al; if (g_inited && ch >= 0) Mix_HaltChannel(ch); }
+void compatAudioStopEffect(int ch)   { AudioLock al; if (g_inited && ch >= 0) { Mix_HaltChannel(ch); g_ch_gain.erase(ch); } }
 void compatAudioPauseEffect(int ch)  { AudioLock al; if (g_inited && ch >= 0) Mix_Pause(ch); }
 void compatAudioResumeEffect(int ch) { AudioLock al; if (g_inited && ch >= 0) Mix_Resume(ch); }
-void compatAudioStopAllEffects()     { AudioLock al; if (g_inited) Mix_HaltChannel(-1); }
+void compatAudioStopAllEffects()     { AudioLock al; if (g_inited) { Mix_HaltChannel(-1); g_ch_gain.clear(); } }
 void compatAudioPauseAllEffects()    { AudioLock al; if (g_inited) Mix_Pause(-1); }
 void compatAudioResumeAllEffects()   { AudioLock al; if (g_inited) Mix_Resume(-1); }
 
 void compatAudioSetEffectsVolume(float v) {
     AudioLock al;
     g_fx_vol = v < 0 ? 0 : v > 1 ? 1 : v;
-    if (g_inited) Mix_Volume(-1, (int)(g_fx_vol * MIX_MAX_VOLUME));
+    if (!g_inited) return;
+    // Rescale each channel against its own gain rather than Mix_Volume(-1, …),
+    // which set every channel to the global level and discarded the per-effect
+    // gain — so one setEffectsVolume call made quiet effects as loud as loud
+    // ones, and the engine loop jumped to full until the game next rode it.
+    for (int ch = 0; ch < Mix_AllocateChannels(-1); ch++) applyChannelVolume(ch);
 }
 
 float compatAudioGetMusicVolume()   { return g_music_vol; }
