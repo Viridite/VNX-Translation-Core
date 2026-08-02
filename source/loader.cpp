@@ -15,6 +15,7 @@
 #include <unistd.h>
 #include <strings.h>
 #include <cstring>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -431,13 +432,15 @@ static const AssetPatch kHillClimbPatches[] = {
     {"Moga_Pocket_Guide.png", nullptr},
 };
 
-// Recursively search dir for a file matching `filename` (case-insensitive).
-// Returns the full path, or "" if not found. Extracted asset trees are only
-// a few directories deep, so a plain recursive walk is plenty fast.
-static std::string findFileRecursive(const std::string& dir, const std::string& filename) {
+// Recursively collect EVERY file under dir matching `filename`
+// (case-insensitive). Cocos2d-x games routinely ship the same asset at several
+// resolutions — assets/hd/, assets/sd/, and so on — so stopping at the first
+// match patched one copy and left the game free to load a different one. That
+// is consistent with the controller guide still showing a MOGA pad while the
+// log reported the replacement written.
+static void listFilesRecursive(const std::string& dir, std::vector<std::string>& out) {
     DIR* d = opendir(dir.c_str());
-    if (!d) return "";
-    std::string found;
+    if (!d) return;
     struct dirent* ent;
     while ((ent = readdir(d))) {
         std::string nm = ent->d_name;
@@ -445,16 +448,27 @@ static std::string findFileRecursive(const std::string& dir, const std::string& 
         std::string path = dir + "/" + nm;
         struct stat st;
         if (stat(path.c_str(), &st) != 0) continue;
-        if (S_ISDIR(st.st_mode)) {
-            found = findFileRecursive(path, filename);
-            if (!found.empty()) break;
-        } else if (strcasecmp(nm.c_str(), filename.c_str()) == 0) {
-            found = path;
-            break;
-        }
+        if (S_ISDIR(st.st_mode)) listFilesRecursive(path, out);
+        else                     out.push_back(path);
     }
     closedir(d);
-    return found;
+}
+
+static void findAllRecursive(const std::string& dir, const std::string& filename,
+                             std::vector<std::string>& out) {
+    DIR* d = opendir(dir.c_str());
+    if (!d) return;
+    struct dirent* ent;
+    while ((ent = readdir(d))) {
+        std::string nm = ent->d_name;
+        if (nm == "." || nm == "..") continue;
+        std::string path = dir + "/" + nm;
+        struct stat st;
+        if (stat(path.c_str(), &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) findAllRecursive(path, filename, out);
+        else if (strcasecmp(nm.c_str(), filename.c_str()) == 0) out.push_back(path);
+    }
+    closedir(d);
 }
 
 static void applyGamePatches(const std::string& pkg_name, const std::string& asset_dir) {
@@ -462,12 +476,42 @@ static void applyGamePatches(const std::string& pkg_name, const std::string& ass
     romfsInit();
     const char* guideSrc = guideForInput();
     compatLogFmt("patch: controller guide -> %s", guideSrc);
+
+    // Every controller-help-looking asset the game actually ships, listed once.
+    // Which file HCR puts on screen has been guesswork twice now — the log said
+    // the replacement was written and a MOGA pad still appeared — and that is
+    // only answerable by seeing what candidates exist. Names are cheap; another
+    // hardware round trip is not.
+    {
+        static const char* kNeedles[] = {"moga", "guide", "controller", "gamepad"};
+        std::vector<std::string> all;
+        listFilesRecursive(asset_dir, all);
+        int shown = 0;
+        for (const std::string& f : all) {
+            std::string lower = f;
+            for (char& c : lower) c = (char)tolower((unsigned char)c);
+            for (const char* n : kNeedles) {
+                if (lower.find(n) != std::string::npos) {
+                    compatLogFmt("patch: candidate asset %s", f.c_str());
+                    if (++shown >= 24) { compatLog("patch: (candidate list truncated)"); }
+                    break;
+                }
+            }
+            if (shown >= 24) break;
+        }
+        if (!shown) compatLog("patch: no controller-guide-looking assets found at all");
+    }
     for (const AssetPatch& patch : kHillClimbPatches) {
-        std::string target = findFileRecursive(asset_dir, patch.filename);
-        if (target.empty()) {
+        std::vector<std::string> targets;
+        findAllRecursive(asset_dir, patch.filename, targets);
+        if (targets.empty()) {
             compatLogFmt("patch: %s not found under assets — skipped", patch.filename);
             continue;
         }
+        if (targets.size() > 1)
+            compatLogFmt("patch: %s exists in %zu places — replacing all of them",
+                         patch.filename, targets.size());
+        for (const std::string& target : targets) {
         SDL_Surface* orig = IMG_Load(target.c_str());
         if (!orig) {
             compatLogFmt("patch: couldn't read original %s (%s) — skipped",
@@ -501,6 +545,7 @@ static void applyGamePatches(const std::string& pkg_name, const std::string& ass
             SDL_FreeSurface(scaled);
         }
         SDL_FreeSurface(repl);
+        }
     }
 }
 
