@@ -39,6 +39,9 @@ extern volatile int      g_recover_sig;
 extern volatile uint32_t g_recover_esr;
 extern volatile uint64_t g_recover_pc;
 extern volatile uint64_t g_recover_far;
+extern volatile uint64_t g_recover_lr;
+extern volatile uint64_t g_recover_x0;
+extern volatile uint64_t g_recover_x8;
 
 // Persistent path storage — launchApk stores these so ANativeActivity pointers
 // remain valid after launchApk returns (for runGameOnMainThread).
@@ -1948,6 +1951,16 @@ void runGameOnMainThread(void* game_so_ptr,
                 g_in_recover = false;
                 char sym_buf[160];
                 elfNearestSym(so, g_recover_pc - (uint64_t)so->base, sym_buf, sizeof(sym_buf));
+                // Caller + operands, so "how did we get here" is answerable from
+                // the log alone. A patched-but-still-crashing block previously
+                // could not be explained without another hardware round trip.
+                {
+                    char lrb[128];
+                    compatLogFmt("FAULT caller: lr=%p (%s) x0=%p x8=%p",
+                                 (void*)g_recover_lr,
+                                 so ? elfNearestSym(so, g_recover_lr, lrb, sizeof lrb) : "?",
+                                 (void*)g_recover_x0, (void*)g_recover_x8);
+                }
                 compatLogFmt("Cocos2d-x: game loop FAULT sig=%d esr=0x%08x pc=%p far=%p sym=%s frame=%d — stop",
                              g_recover_sig, g_recover_esr,
                              (void*)g_recover_pc, (void*)g_recover_far, sym_buf, frame);

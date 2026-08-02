@@ -25,6 +25,14 @@ volatile int      g_recover_sig = 0;
 volatile uint32_t g_recover_esr = 0;
 volatile uint64_t g_recover_pc  = 0;
 volatile uint64_t g_recover_far = 0;  // Fault Address Register
+// Captured alongside the fault so a crash log can answer "how did we GET here",
+// not just "where did it stop". Without the link register a jump into the
+// middle of a block is invisible: a shop crash was patched at the entry point
+// that the disassembly showed, applied correctly, and still fired — because
+// something branched straight past it, and nothing in the log could say what.
+volatile uint64_t g_recover_lr  = 0;   // x30, the return address
+volatile uint64_t g_recover_x0  = 0;   // first operand, usually the null one
+volatile uint64_t g_recover_x8  = 0;
 
 static void logUnrecoveredFault(ThreadExceptionDump* ctx);
 
@@ -38,6 +46,9 @@ extern "C" void __libnx_exception_handler(ThreadExceptionDump* ctx) {
         g_recover_esr = esr;
         g_recover_pc  = ctx->pc.x;
         g_recover_far = ctx->far.x;
+        g_recover_lr  = ctx->lr.x;
+        g_recover_x0  = ctx->cpu_gprs[0].x;
+        g_recover_x8  = ctx->cpu_gprs[8].x;
         longjmp(g_recover_jmp, 1);
     }
     logUnrecoveredFault(ctx);
