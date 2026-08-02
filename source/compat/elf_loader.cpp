@@ -94,22 +94,40 @@ const char* elfNearestSym(const LoadedSo* so, uint64_t vaddr, char* buf, size_t 
         snprintf(buf, sz, "0x%llx", (unsigned long long)vaddr);
         return buf;
     }
+    // No real function is bigger than this. Used as the cutoff for symbols that
+    // don't carry an st_size, so "nearest preceding symbol" can't run away.
+    static const uint64_t MAX_FUNC_SPAN = 1u << 20;   // 1MB
+
     uint64_t best_val  = 0;
+    uint64_t best_size = 0;
     const char* best   = nullptr;
     for (uint32_t i = 0; i < so->sym_count; i++) {
         const Elf64_Sym& s = so->symtab_heap[i];
         if (s.st_value == 0 || !s.st_name || s.st_name >= so->strsz) continue;
         if (s.st_value > vaddr) continue;
+        // When the symbol declares a size, an address past its end simply
+        // isn't in it — don't let it claim one.
+        if (s.st_size && vaddr >= s.st_value + s.st_size) continue;
         if (s.st_value >= best_val) {
-            best_val = s.st_value;
-            best     = so->strtab_heap + s.st_name;
+            best_val  = s.st_value;
+            best_size = s.st_size;
+            best      = so->strtab_heap + s.st_name;
         }
     }
-    if (!best || best[0] == '\0')
+
+    // A hardware log once attributed 153 faults to "UnitySendMessage+0x55d608ea4"
+    // — a 23GB offset, for a PC that wasn't even inside the module. Naming a
+    // function that far away is worse than admitting we don't know, because it
+    // sends whoever reads the log after the wrong code. Fall back to the raw
+    // address whenever the offset stops being believable.
+    uint64_t off = best ? (vaddr - best_val) : 0;
+    bool plausible = best && best[0] != '\0' &&
+                     (best_size ? off < best_size : off < MAX_FUNC_SPAN);
+
+    if (!plausible)
         snprintf(buf, sz, "0x%llx", (unsigned long long)vaddr);
     else
-        snprintf(buf, sz, "%.80s+0x%llx", best,
-                 (unsigned long long)(vaddr - best_val));
+        snprintf(buf, sz, "%.80s+0x%llx", best, (unsigned long long)off);
     return buf;
 }
 
