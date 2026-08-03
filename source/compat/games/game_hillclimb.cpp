@@ -106,6 +106,37 @@ void patchShopItemVirtualCall(uint8_t* base, uint64_t min_vaddr, size_t alloc_si
               "(null vtable deref; branches over the call from every path)");
 }
 
+// Quirk 4 — the controller name printed beside the guide.
+// The guide images are replaced with Switch artwork, but HCR draws its own
+// caption next to them from a (name, file) table in .rodata:
+//   0x6095ef "MOGA PRO"     0x6095f8 "Moga_Pro_Guide.png"
+//   0x60960b "MOGA POCKET"  0x609617 "Moga_Pocket_Guide.png"
+// so the screen showed a Switch Pro Controller labelled "MOGA PRO", which
+// reads as the patch not having worked at all.
+//
+// Both are NUL-terminated in place, so a shorter replacement fits without
+// moving anything: write the new text and re-terminate inside the original
+// space. Nothing may be written past the original length — the next string
+// starts immediately after.
+void patchControllerNames(uint8_t* base, uint64_t min_vaddr, size_t alloc_size) {
+    struct NamePatch { uint64_t vaddr; const char* from; const char* to; };
+    static const NamePatch kNames[] = {
+        {0x6095ef, "MOGA PRO",    "PRO CTRL"},   // 8 -> 8
+        {0x60960b, "MOGA POCKET", "JOY-CON"},    // 11 -> 7, rest zeroed
+    };
+    for (const NamePatch& n : kNames) {
+        size_t oldLen = strlen(n.from), newLen = strlen(n.to);
+        if (newLen > oldLen) continue;                       // never overrun
+        if (!inRange(n.vaddr, min_vaddr, alloc_size) ||
+            !inRange(n.vaddr + oldLen, min_vaddr, alloc_size)) continue;
+        char* at = (char*)(base + n.vaddr);
+        if (memcmp(at, n.from, oldLen) != 0 || at[oldLen] != '\0') continue;
+        memcpy(at, n.to, newLen);
+        memset(at + newLen, 0, oldLen - newLen);             // re-terminate + pad
+        compatLogFmt("quirk[HCR]: controller name \"%s\" -> \"%s\"", n.from, n.to);
+    }
+}
+
 }  // namespace
 
 // ─── Registry entry points ──────────────────────────────────────────────────
@@ -120,6 +151,7 @@ void gameApplyQuirks(const char* pkg, const char* soname,
         patchShopPopulate(stage_base, min_vaddr, alloc_size);
         patchSkinLookupGuard(stage_base, min_vaddr, alloc_size);
         patchShopItemVirtualCall(stage_base, min_vaddr, alloc_size);
+        patchControllerNames(stage_base, min_vaddr, alloc_size);
     }
 }
 
