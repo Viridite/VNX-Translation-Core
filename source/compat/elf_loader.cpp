@@ -38,6 +38,8 @@ volatile uint64_t g_recover_x8  = 0;
 // int rather than an atomic: this runs on libnx's shared exception stack, and
 // the handler's recovery path must stay as close to nothing as possible.
 volatile int      g_ctor_faults = 0;
+volatile uint64_t g_recover_fp  = 0;   // x29 — the frame chain the walk starts from
+volatile uint64_t g_recover_sp  = 0;
 
 // ─── Heap canaries ───────────────────────────────────────────────────────────
 // Brain It On dies with 155 faults inside newlib's free(), unlinking a chunk
@@ -100,6 +102,8 @@ extern "C" void __libnx_exception_handler(ThreadExceptionDump* ctx) {
         g_recover_lr  = ctx->lr.x;
         g_recover_x0  = ctx->cpu_gprs[0].x;
         g_recover_x8  = ctx->cpu_gprs[8].x;
+        g_recover_fp  = ctx->fp.x;
+        g_recover_sp  = ctx->sp.x;
         g_ctor_faults++;
         longjmp(g_recover_jmp, 1);
     }
@@ -119,6 +123,42 @@ extern "C" void __libnx_exception_handler(ThreadExceptionDump* ctx) {
     extern ThreadExceptionDump __nx_exceptiondump;
     __nx_exceptiondump = *ctx;
     exit(0);
+}
+
+// Walk the AArch64 frame chain and name each return address.
+//
+// A single link register was not enough: _free_r had already spilled its
+// caller's x30, so the value in the register was an address inside _free_r
+// itself. The frame records are what actually hold the chain — each is a
+// [saved x29, saved x30] pair at the frame pointer.
+//
+// Every load is checked with svcQueryMemory first. A fault inside this walk
+// would not be recoverable — the ctor's jmp_buf has already been consumed by
+// the time it runs — and would take the process down with it.
+static bool readableWord(uint64_t addr) {
+    if (!addr || (addr & 7)) return false;
+    MemoryInfo mi = {}; u32 pi = 0;
+    if (R_FAILED(svcQueryMemory(&mi, &pi, addr))) return false;
+    if (mi.perm == Perm_None) return false;
+    return (addr + 16) <= (mi.addr + mi.size);
+}
+
+static void logFaultBacktrace(void) {
+    char line[256];
+    uint64_t fp = g_recover_fp;
+    compatLog("ELF:   backtrace (frame chain):");
+    for (int depth = 0; depth < 10; depth++) {
+        if (!readableWord(fp)) break;
+        uint64_t next = ((const uint64_t*)fp)[0];
+        uint64_t lr   = ((const uint64_t*)fp)[1];
+        if (!lr) break;
+        char where[192];
+        elfDescribePc(lr, where, sizeof(where));
+        snprintf(line, sizeof(line), "ELF:     #%d %p  %s", depth, (void*)lr, where);
+        compatLog(line);
+        if (next <= fp) break;          // chain must climb, or it is garbage
+        fp = next;
+    }
 }
 
 static void ctor_crash_handler(int sig) {
@@ -283,6 +323,10 @@ void elfRunCtors(LoadedSo* so, ProgressCb cb) {
                          (void*)g_recover_pc, (void*)g_recover_far, sym_buf,
                          (void*)g_recover_lr, lr_buf,
                          (void*)g_recover_x0, (void*)g_recover_x8);
+            // Only the first few: 155 identical faults would bury the log, and
+            // they all come from the same place.
+            if (g_ctor_faults <= 3) logFaultBacktrace();
+
             // Dump surrounding instructions to diagnose root cause
             const uint32_t* insn = (const uint32_t*)(uintptr_t)g_recover_pc;
             compatLogFmt("ELF: INSN: [pc-12]=%08x [pc-8]=%08x [pc-4]=%08x [pc]=%08x [pc+4]=%08x",

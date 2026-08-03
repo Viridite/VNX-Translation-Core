@@ -75,12 +75,28 @@ void orientInit(GameOrient want) {
     // Grab the handheld sensor handles up front. These are the Joy-Cons docked
     // into the console (or, on a Lite, its built-in sensor) — the only ones
     // whose orientation means anything about the screen.
-    if (R_SUCCEEDED(hidGetSixAxisSensorHandles(g_sensors, 2, HidNpadIdType_Handheld,
-                                               HidNpadStyleTag_NpadHandheld))) {
-        if (R_SUCCEEDED(hidStartSixAxisSensor(g_sensors[0]))) {
+    // The npad has to be configured before its sensors can be asked for, and
+    // SDL only sets up what it needs for buttons. Ask for the handheld and
+    // dual styles explicitly; this is idempotent and does not disturb SDL's
+    // own reading of the same pads.
+    hidSetSupportedNpadStyleSet(HidNpadStyleTag_NpadHandheld |
+                                HidNpadStyleTag_NpadJoyDual |
+                                HidNpadStyleTag_NpadFullKey);
+    const HidNpadIdType ids[] = { HidNpadIdType_Handheld, HidNpadIdType_No1 };
+    hidSetSupportedNpadIdType(ids, 2);
+
+    Result rc = hidGetSixAxisSensorHandles(g_sensors, 2, HidNpadIdType_Handheld,
+                                           HidNpadStyleTag_NpadHandheld);
+    if (R_SUCCEEDED(rc)) {
+        Result rs = hidStartSixAxisSensor(g_sensors[0]);
+        if (R_SUCCEEDED(rs)) {
             hidStartSixAxisSensor(g_sensors[1]);
             g_have_sensor = true;
+        } else {
+            compatLogFmt("orientation: hidStartSixAxisSensor failed rc=0x%x", rs);
         }
+    } else {
+        compatLogFmt("orientation: hidGetSixAxisSensorHandles failed rc=0x%x", rc);
     }
 
     const char* w = "unspecified";
