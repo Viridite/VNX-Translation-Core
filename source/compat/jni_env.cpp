@@ -842,7 +842,21 @@ static void s_CallStaticVoidMethodV(JNIEnv*, jclass, jmethodID mid, va_list args
     // Mix_Chunk playback rate isn't adjustable per-channel without a custom
     // resampling engine bypassing SDL_mixer's mixer entirely. No-op for now
     // (silent — this one is expected/logged in README, not a bug to chase).
-    if (strcmp(e->name, "setEffectRate") == 0) { va_arg(args, int); va_arg(args, double); return; }
+    // setEffectRate(id, rate) — the game's playback-rate (pitch) control.
+    //
+    // Both arguments used to be read and thrown away. SDL_mixer cannot change
+    // playback rate, so that was defensible as far as *doing* anything goes —
+    // but the rate is also the only reliable signal for when the sound being
+    // played bears no resemblance to the sound intended, which is what makes
+    // the stage-start engine sweep come out as a loud drone. Passing it through
+    // lets the mixer pull the channel down for exactly as long as the rate is
+    // wrong, instead of muting on a 2.5s timer that has to guess.
+    if (strcmp(e->name, "setEffectRate") == 0) {
+        int   id   = va_arg(args, int);
+        float rate = (float)va_arg(args, double);
+        compatAudioSetEffectRate(id, rate);
+        return;
+    }
     if (strcmp(e->name, "stopAllEffects") == 0)  { compatAudioStopAllEffects(); return; }
     if (strcmp(e->name, "pauseAllEffects") == 0) { compatAudioPauseAllEffects(); return; }
     if (strcmp(e->name, "resumeAllEffects") == 0){ compatAudioResumeAllEffects(); return; }

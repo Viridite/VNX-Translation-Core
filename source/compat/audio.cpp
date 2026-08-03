@@ -10,6 +10,7 @@
 #include <SDL2/SDL_mixer.h>
 #include <cstring>
 #include <string>
+#include <cmath>
 #include <map>
 #include <unordered_map>
 
@@ -41,6 +42,34 @@ static std::unordered_map<std::string, Mix_Music*> g_musicCache;
 static const int kChannels = 24;
 
 static Uint32 g_fx_mute_until = 0;
+
+// Playback rate per channel, as the game last set it.
+//
+// HCR rides the engine loop's rate continuously — that is its RPM. SDL_mixer
+// cannot change playback rate, so whatever the game asks for, the sample keeps
+// playing at its recorded pitch. At normal RPM that is merely wrong; during the
+// stage-start sweep, where the rate runs far from 1.0, it is a loud broken
+// drone, because the sound being played is nothing like the sound intended.
+//
+// A fixed mute window was covering that with a timer, which has to guess how
+// long the sweep lasts. The rate itself says exactly when it is over.
+static std::map<int, float> g_ch_rate;
+
+// How far from 1.0 the rate has to be before the sample is misleading enough to
+// pull down. Normal engine RPM stays inside this; the drop-in sweep does not.
+static const float kRateBand = 0.35f;
+
+static float rateAttenuation(int ch) {
+    auto it = g_ch_rate.find(ch);
+    if (it == g_ch_rate.end()) return 1.0f;
+    float dev = fabsf(it->second - 1.0f);
+    if (dev <= kRateBand) return 1.0f;
+    // Fade rather than cut: a hard gate on a value the game sweeps through
+    // would chatter every time it crossed the threshold.
+    float t = (dev - kRateBand) / kRateBand;
+    if (t > 1.0f) t = 1.0f;
+    return 1.0f - t;
+}
 static bool fxMuted() { return SDL_GetTicks() < g_fx_mute_until; }
 
 static bool ensureInit() {
@@ -171,7 +200,8 @@ static void applyChannelVolume(int ch) {
     float gain = 1.0f;
     auto it = g_ch_gain.find(ch);
     if (it != g_ch_gain.end()) gain = it->second;
-    Mix_Volume(ch, fxMuted() ? 0 : (int)(g_fx_vol * gain * MIX_MAX_VOLUME));
+    Mix_Volume(ch, fxMuted() ? 0
+                             : (int)(g_fx_vol * gain * rateAttenuation(ch) * MIX_MAX_VOLUME));
 }
 
 int compatAudioPlayEffect(const char* p, bool loop, float gain) {
@@ -181,7 +211,7 @@ int compatAudioPlayEffect(const char* p, bool loop, float gain) {
     if (!c) return -1;
     if (gain < 0) gain = 0; else if (gain > 1) gain = 1;
     int ch = Mix_PlayChannel(-1, c, loop ? -1 : 0);
-    if (ch >= 0) { g_ch_gain[ch] = gain; applyChannelVolume(ch); }
+    if (ch >= 0) { g_ch_gain[ch] = gain; g_ch_rate.erase(ch); applyChannelVolume(ch); }
     return ch;
 }
 
@@ -206,6 +236,17 @@ void compatAudioSetEffectVolume(int ch, float vol) {
 // loop begins right after this, so the per-channel fxMuted() checks in
 // playEffect/setEffectVolume keep it silent without a blanket Mix_Volume(-1,0)
 // here — which could strand a loop the game never re-sets.
+// The game's own playback-rate change. We cannot honour it, but knowing it is
+// what lets the mixer stay quiet exactly as long as the sound would be wrong,
+// instead of for a fixed guess at how long that is.
+void compatAudioSetEffectRate(int ch, float rate) {
+    AudioLock al;
+    if (!g_inited || ch < 0) return;
+    if (rate < 0.0f) rate = 0.0f;
+    g_ch_rate[ch] = rate;
+    applyChannelVolume(ch);
+}
+
 void compatAudioMuteEffectsFor(int ms) {
     AudioLock al;
     if (ms <= 0) return;
@@ -213,10 +254,10 @@ void compatAudioMuteEffectsFor(int ms) {
     if (until > g_fx_mute_until) g_fx_mute_until = until;
 }
 
-void compatAudioStopEffect(int ch)   { AudioLock al; if (g_inited && ch >= 0) { Mix_HaltChannel(ch); g_ch_gain.erase(ch); } }
+void compatAudioStopEffect(int ch)   { AudioLock al; if (g_inited && ch >= 0) { Mix_HaltChannel(ch); g_ch_gain.erase(ch); g_ch_rate.erase(ch); } }
 void compatAudioPauseEffect(int ch)  { AudioLock al; if (g_inited && ch >= 0) Mix_Pause(ch); }
 void compatAudioResumeEffect(int ch) { AudioLock al; if (g_inited && ch >= 0) Mix_Resume(ch); }
-void compatAudioStopAllEffects()     { AudioLock al; if (g_inited) { Mix_HaltChannel(-1); g_ch_gain.clear(); } }
+void compatAudioStopAllEffects()     { AudioLock al; if (g_inited) { Mix_HaltChannel(-1); g_ch_gain.clear(); g_ch_rate.clear(); } }
 void compatAudioPauseAllEffects()    { AudioLock al; if (g_inited) Mix_Pause(-1); }
 void compatAudioResumeAllEffects()   { AudioLock al; if (g_inited) Mix_Resume(-1); }
 

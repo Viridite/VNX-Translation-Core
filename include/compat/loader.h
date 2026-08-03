@@ -333,6 +333,11 @@ void  compatAudioPauseAllEffects();
 void  compatAudioResumeAllEffects();
 void  compatAudioSetEffectsVolume(float v);
 void  compatAudioMuteEffectsFor(int ms);
+// Playback rate as the game set it. SDL_mixer cannot honour it, but it is the
+// only reliable signal for when the sample being played bears no resemblance to
+// the one intended — which is what a pitch sweep sounds like through a mixer
+// that ignores pitch.
+void  compatAudioSetEffectRate(int ch, float rate);
 float compatAudioGetMusicVolume();
 float compatAudioGetEffectsVolume();
 
