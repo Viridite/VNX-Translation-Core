@@ -141,6 +141,9 @@ struct CompatLayer {
 
 // ─── Launch result ────────────────────────────────────────────────────────────
 struct LaunchResult {
+    // Set when the game runs under the ARM32 interpreter, which is driven
+    // differently from a native arm64 game once loading is done.
+    bool is_arm32 = false;
     bool        ok          = false;
     std::string errorStage;   // which step failed (e.g. "Extracting APK")
     std::string errorDetail;  // human-readable reason

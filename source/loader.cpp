@@ -811,7 +811,12 @@ bool apkInstall(const std::string& apk_path, const std::string& pkg_name, Progre
 // present through exactly the same context and surface.
 namespace a32 { void a32FrameSwap(void); }
 void a32::a32FrameSwap(void) {
-    if (g_egl_display && g_egl_surface) eglSwapBuffers(g_egl_display, g_egl_surface);
+    // Whatever is current on this thread — nothing creates a context for the
+    // 32-bit path, it borrows SDL's, and asking EGL directly avoids depending
+    // on globals that only the 64-bit path fills in.
+    EGLDisplay d = eglGetCurrentDisplay();
+    EGLSurface s = eglGetCurrentSurface(EGL_DRAW);
+    if (d != EGL_NO_DISPLAY && s != EGL_NO_SURFACE) eglSwapBuffers(d, s);
 }
 
 // ─── launchApk ───────────────────────────────────────────────────────────────
@@ -952,27 +957,21 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
             }
             compatAudioSetAssetsDir(asset_dir.c_str());
 
-            // The guest is about to issue GL, so the context has to exist
-            // first. The 64-bit path sets this up further down, past the point
-            // this branch returns from.
-            ANativeWindow* nwin32 = &g_compat.window;
-            nwin32->width  = 1280;
-            nwin32->height = 720;
-            nwin32->format = 1;
-            nwin32->nwin   = nwindowGetDefault();
-            if (!setupEGL(nwin32)) {
-                compatLog("arm32: EGL setup failed — the game cannot present");
-                result.errorStage  = "ARM32 emulation";
-                result.errorDetail = "Could not create a GL context for the 32-bit game.";
-                if (g_compat_log) { logFlushDedup(); fclose(g_compat_log); g_compat_log = nullptr; }
-                return result;
-            }
-            compatLog("arm32: EGL ready");
-
             int rc = a32::run(main32.c_str(), pkg_name.c_str());
-            compatLogFmt("arm32: run returned %d", rc);
+            compatLogFmt("arm32: load returned %d", rc);
             result.ok = (rc == 0);
-            if (rc != 0) { result.errorStage = "ARM32 emulation"; result.errorDetail = "ARM32 layer stopped early — see compat_log.txt."; }
+            if (rc != 0) {
+                result.errorStage  = "ARM32 emulation";
+                result.errorDetail = "ARM32 layer stopped early — see compat_log.txt.";
+            } else {
+                // Loaded, not run. Rendering needs the main thread's GL
+                // context, so it is marked ready and driven from there — the
+                // same split the 64-bit path uses, and the reason creating a
+                // second EGL surface here failed: SDL already owns the only one
+                // the window allows.
+                result.is_arm32 = true;
+                result.game_so  = (void*)1;   // non-null: "there is a game to run"
+            }
             if (g_compat_log) { logFlushDedup(); fclose(g_compat_log); g_compat_log = nullptr; }
             return result;
         }

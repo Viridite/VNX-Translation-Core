@@ -1447,7 +1447,14 @@ struct App {
             std::string base_dir = std::string("sdmc:/Viridite/games/") + pkg;
             compatLog("loader: handing off to the game on the main thread");
             compatLogFlush();
-            runGameOnMainThread(ctx.result.game_so, win, ctx.apk_path, base_dir);
+            if (ctx.result.is_arm32) {
+                // A 32-bit game is driven by the interpreter, but from here —
+                // this thread owns the GL context, and the guest's GL goes
+                // through the bridge onto whatever is current.
+                a32::runFrames();
+            } else {
+                runGameOnMainThread(ctx.result.game_so, win, ctx.apk_path, base_dir);
+            }
             gameRanOnce = true;
         }
 

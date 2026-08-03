@@ -37,6 +37,18 @@ static uint32_t callGuest(CpuState& c, uint32_t func, uint32_t a0=0, uint32_t a1
     return c.r[0];
 }
 
+// The CPU and the loaded image outlive run().
+//
+// Loading, relocating and running constructors is CPU work and belongs on the
+// loader thread, where it happens while the launcher keeps drawing. Rendering
+// does not: SDL's EGL context is current on the main thread, and a GL call from
+// anywhere else has no context at all. The 64-bit path splits along exactly the
+// same line, which is why it hands game execution back through
+// runGameOnMainThread rather than finishing the job where it loaded.
+static CpuState    s_cpu = {};
+static LoadedElf32 s_elf = {};
+static bool        s_ready = false;
+
 int run(const char* main_so_host_path, const char* pkg) {
     compatLogFmt("arm32: bring-up for %s (%s)", pkg ? pkg : "?", main_so_host_path);
     if (!memInit()) return -1;
@@ -47,7 +59,7 @@ int run(const char* main_so_host_path, const char* pkg) {
     LoadedElf32 elf = elf32Load(main_so_host_path);
     if (!elf.ok) { compatLog("arm32: ELF32 load failed"); return -2; }
 
-    CpuState cpu = {};
+    CpuState& cpu = s_cpu;
     cpu.r[13] = A32_STACK_TOP;          // SP
     cpu.cpsr  = 0x10;                    // user mode
 
@@ -106,20 +118,21 @@ int run(const char* main_so_host_path, const char* pkg) {
         compatLog("arm32: no JNI_OnLoad export");
     }
 
-    // ── Run the game ────────────────────────────────────────────────────────
-    // Everything above was bring-up: load, relocate, construct, JNI_OnLoad. It
-    // then reported success and returned, which is why launching a 32-bit game
-    // said it had worked and showed nothing — the loader had done its part and
-    // nobody had asked the game to draw.
-    //
-    // cocos2d-x is driven from Java: nativeInit once with the surface size,
-    // then nativeRender every frame. Those are ordinary exports, so the
-    // interpreter can call them directly and the GL the guest issues goes
-    // through the bridge onto the same context the launcher is already using.
-    uint32_t nativeInit = elf32Sym("Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeInit");
-    if (!nativeInit) nativeInit = elf32Sym("Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeInit__II");
-    uint32_t nativeRender = elf32Sym("Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeRender");
+    // Loaded, constructed and JNI_OnLoad done. Rendering happens on the main
+    // thread — see runFrames.
+    s_elf   = elf;
+    s_ready = true;
+    compatLog("arm32: load complete — handing rendering to the main thread");
+    return 0;
+}
 
+// Called from the main thread, where SDL's EGL context is current.
+int runFrames(void) {
+    if (!s_ready) { compatLog("arm32: runFrames with nothing loaded"); return -1; }
+    CpuState& cpu = s_cpu;
+
+    uint32_t nativeInit = elf32Sym("Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeInit");
+    uint32_t nativeRender = elf32Sym("Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeRender");
     if (!nativeInit || !nativeRender) {
         compatLogFmt("arm32: no cocos2d-x renderer exports (init=0x%x render=0x%x) — "
                      "loaded but nothing to drive", nativeInit, nativeRender);
@@ -142,21 +155,18 @@ int run(const char* main_so_host_path, const char* pkg) {
     while (!requestedAbort()) {
         callGuest(cpu, nativeRender, 0, 0);
         if (cpu.halt) {
-            // A frame that halts is reported once and then counted. The
-            // interpreter is missing something the game reaches every frame, so
-            // logging each one would bury everything else in the file.
+            // Reported once, then counted: something the game reaches every
+            // frame would otherwise bury the rest of the log.
             if (halted_frames == 0) {
                 compatLogFmt("arm32: nativeRender halted at 0x%x on frame %u",
                              cpu.halt_pc, frames);
                 cpuDumpBranches();
+                cpuDumpUnimplSummary();
             }
             halted_frames++;
             cpu.halt = false;
             cpu.r[13] = A32_STACK_TOP;
-            if (halted_frames > 240) {
-                compatLog("arm32: every frame is halting — stopping");
-                break;
-            }
+            if (halted_frames > 240) { compatLog("arm32: every frame is halting — stopping"); break; }
         }
         a32FrameSwap();
         frames++;

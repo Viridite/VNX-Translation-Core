@@ -36,6 +36,11 @@ bool isElf32Arm(const char* path);
 // Returns 0 on clean exit, negative on setup failure. Logs via compatLog*.
 int run(const char* main_so_host_path, const char* pkg);
 
+// Drive the loaded game. Must be called from the thread that owns the GL
+// context — run() only loads, because rendering from the loader thread would
+// have no context to draw into.
+int runFrames(void);
+
 // Ask a running interpreter to stop as soon as possible (UI thread → loader
 // thread). Safe to call any time; the interpreter also self-limits by time.
 void requestAbort();
