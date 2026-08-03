@@ -1218,6 +1218,26 @@ static int stub_sem_trywait(BnxSem* s) {
 }
 
 // ─── Network stubs (no BSD socket service configured) ────────────────────────
+// Network probes are logged, not just refused.
+//
+// The console these run on is offline, and games gate content on that — Hill
+// Climb Racing stops at the end of its tutorial. Failing fast is right, and
+// these already do (no timeouts, nothing hangs), but a silent refusal leaves
+// "it needs internet" as the whole diagnosis. Naming the host the game asked
+// for turns that into something specific: a sign-in endpoint, an ads network
+// and a save-sync service are three different problems, and only one of them
+// is worth patching around.
+//
+// Rate-limited, because a game that has decided it wants the network will ask
+// repeatedly and there is no value in a thousand identical lines.
+static void logNetProbe(const char* what, const char* detail) {
+    static int n = 0;
+    if (n >= 24) return;
+    n++;
+    compatLogFmt("net: %s(%s) → offline%s", what, detail ? detail : "",
+                 n == 24 ? "  [further network calls not logged]" : "");
+}
+
 static int stub_socket(int, int, int)               { errno = ENOTSUP; return -1; }
 static int stub_bind(int, const void*, unsigned)    { errno = ENOTSUP; return -1; }
 static int stub_connect(int, const void*, unsigned) { errno = ECONNREFUSED; return -1; }
@@ -1227,7 +1247,7 @@ static ssize_t stub_recv(int, void*, size_t, int)   { errno = ENOTSUP; return -1
 static ssize_t stub_send(int, const void*, size_t, int) { errno = ENOTSUP; return -1; }
 static int stub_getsockname(int, void*, unsigned*)  { errno = ENOTSUP; return -1; }
 static int stub_getsockopt(int, int, int, void*, unsigned*) { errno = ENOTSUP; return -1; }
-static void* stub_gethostbyname(const char*)        { return nullptr; }
+static void* stub_gethostbyname(const char* h)      { logNetProbe("gethostbyname", h); return nullptr; }
 static int stub_fcntl_sock(int, int, ...)           { return 0; }
 static int* stub_get_h_errno(void)                  { static int h = 0; return &h; }
 
@@ -1945,7 +1965,13 @@ static int    stub_sem_getvalue(void*, int* v)         { if (v) *v = 0; return 0
 static unsigned long stub_inet_addr(const char*)                 { return 0xFFFFFFFFUL; }
 static const char*   stub_inet_ntop(int, const void*, char* dst, unsigned) { if (dst) dst[0] = '\0'; return dst; }
 static int           stub_inet_pton(int, const char*, void*)     { return 0; }
-static int           stub_getaddrinfo(const char*, const char*, const void*, void** res) { if (res) *res = nullptr; return -2; /* EAI_NONAME */ }
+static int           stub_getaddrinfo(const char* host, const char* svc, const void*, void** res) {
+    char d[192];
+    snprintf(d, sizeof(d), "%s%s%s", host ? host : "?", svc ? ":" : "", svc ? svc : "");
+    logNetProbe("getaddrinfo", d);
+    if (res) *res = nullptr;
+    return -2;  // EAI_NONAME
+}
 static void          stub_freeaddrinfo(void*)                    {}
 static int           stub_getnameinfo(const void*, unsigned, char*, unsigned, char*, unsigned, int) { return -2; }
 static int           stub_gethostname(char* n, size_t l)         { if (n && l) { strncpy(n, "switch", l - 1); n[l-1] = '\0'; } return 0; }
