@@ -407,6 +407,18 @@ void shimHeapAnchor(void) {
     if (!g_heap_anchor) g_heap_anchor = malloc(64);
 }
 
+// Coverage of the last walk. A clean result means nothing unless it is known
+// how much ground was covered — twice now I have reported "the heap is clean"
+// when the walk had stopped after a few hundred chunks and never looked at the
+// rest.
+static int         g_walk_steps  = 0;
+static const char* g_walk_stop   = "not run";
+
+void shimHeapWalkStats(int* steps, const char** stop) {
+    if (steps) *steps = g_walk_steps;
+    if (stop)  *stop  = g_walk_stop;
+}
+
 bool shimHeapCheck(char* why, size_t whysz) {
     if (!g_heap_anchor) return true;
 
@@ -416,13 +428,19 @@ bool shimHeapCheck(char* why, size_t whysz) {
     // looking at it. That is why the corruption below went unseen: it sits past
     // that point.
     const uintptr_t arena_end = (uintptr_t)_sbrk_r(_REENT, 0);
+    g_walk_steps = 0;
+    g_walk_stop  = "completed";
+    // A break of 0 or -1 would make every bound below trivially true and turn
+    // the whole walk into an immediate "clean" — say so rather than pretend.
+    if (arena_end < 0x1000) { g_walk_stop = "sbrk returned nothing"; return true; }
 
     const NlChunk* c = (const NlChunk*)((char*)g_heap_anchor - 16);
     size_t prev_sz = 0;
     const NlChunk* prev_c = nullptr;
     for (int i = 0; i < 400000; i++) {
-        if (!memIsHeap(c)) return true;             // walked out of the arena: done
-        if ((uintptr_t)c + 32 > arena_end) return true;   // reached the break
+        g_walk_steps = i;
+        if (!memIsHeap(c)) { g_walk_stop = "left the heap region"; return true; }
+        if ((uintptr_t)c + 32 > arena_end) { g_walk_stop = "reached the break"; return true; }
         size_t sz = nlSize(c);
 
         // The invariant the fault actually violates. When PREV_INUSE is clear
@@ -505,7 +523,8 @@ bool shimHeapCheck(char* why, size_t whysz) {
         }
         c = next;
     }
-    return true;                                     // gave up before finding fault
+    g_walk_stop = "hit the step limit";
+    return true;
 }
 
 static void sh_free(void* p) {

@@ -263,6 +263,9 @@ void          shimAllocCounts(unsigned long* malloc_n, unsigned long* calloc_n,
 const char*   shimAddrRegion(uint64_t addr);
 void          shimHeapAnchor(void);
 bool          shimHeapCheck(char* why, size_t whysz);
+// How far the last walk got, and why it stopped. A clean result is only
+// meaningful alongside these.
+void          shimHeapWalkStats(int* steps, const char** stop);
 
 // Tell the loader what the game's manifest asked for, before launchApk.
 // Raw android:screenOrientation constant; -1 for unspecified.

@@ -397,6 +397,12 @@ void elfRunCtors(LoadedSo* so, ProgressCb cb) {
     signal(SIGBUS,  SIG_DFL);
     signal(SIGILL,  SIG_DFL);
     elfHeapCanaryCheck("constructors");
+    {
+        int steps = 0; const char* stop = "?";
+        shimHeapWalkStats(&steps, &stop);
+        compatLogFmt("ELF: %s: heap walk covered %d chunks, stopped: %s (%s)",
+                     soname, steps, stop, heap_ok ? "no corruption seen" : "corruption reported");
+    }
     compatLogFmt("ELF: %s: ctors done ok=%d failed=%d skipped=%d",
                  soname, ok, failed, skipped);
     {
