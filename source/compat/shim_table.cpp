@@ -23,6 +23,10 @@
 #include <wctype.h>
 #include <locale.h>
 #include <setjmp.h>
+#include <semaphore.h>
+#include <zlib.h>
+#include <fnmatch.h>
+#include <libgen.h>
 #include <sys/lock.h>
 #include <climits>
 #include <fenv.h>
@@ -1260,9 +1264,173 @@ static long stub_writev(int fd, const void* iov_in, int cnt) {
 }
 
 // ─── Shim table ──────────────────────────────────────────────────────────────
+
+// ─── Coverage gaps found by auditing a real session's unresolved list ────────
+// Every symbol an .so imports and we don't provide is a landmine: it's poisoned
+// and the game only dies if it ever reaches it, which is what makes these show
+// up as unrelated game-specific bugs much later. These came from Brain It On's
+// 30 unresolved imports, but nothing here is game-specific — they're ordinary
+// libc/zlib/Android surface that any NDK title can reference.
+
+// zlib. The Core already links -lz, so these are straight passthroughs; games
+// use them to decompress their own assets, and an unresolved inflate is a
+// silent asset-loading failure rather than an obvious crash.
+// (declarations come from <zlib.h>, included above)
+
+// Android's system-property store. There is no property service here, so the
+// honest answer is "no such property" — 0 length, empty value. Games use it for
+// device fingerprinting and feature checks and cope with absence.
+static const void* stub_system_property_find(const char*) { return nullptr; }
+static int stub_system_property_read(const void*, char* name, char* value) {
+    if (name)  name[0]  = '\0';
+    if (value) value[0] = '\0';
+    return 0;
+}
+
+// The remainder of the audited gap. Each is either a real implementation the
+// toolchain lacks, or a stub whose failure mode is the one the caller already
+// has to handle.
+static void* stub_memrchr(const void* sv, int c, size_t n) {
+    const unsigned char* p = (const unsigned char*)sv;
+    while (n--) if (p[n] == (unsigned char)c) return (void*)(p + n);
+    return nullptr;
+}
+// sincos is a GNU convenience wrapper; computing both is exactly its contract.
+static void stub_sincos(double x, double* s, double* c) {
+    if (s) *s = sin(x);
+    if (c) *c = cos(x);
+}
+// Timed semaphore wait. Horizon's condvar-based semaphores don't expose a
+// deadline through this shape, so this waits without one — a caller that
+// expected a timeout blocks longer than it asked, which is far better than
+// returning "timed out" while the resource was actually available.
+static int stub_sem_timedwait(void* sem, const void*) {
+    return sem_wait((sem_t*)sem);
+}
+// Socket calls that can't work without a Berkeley socket a game actually owns.
+// Returning an error is honest; pretending success would corrupt its state.
+static int stub_getpeername(int, void*, unsigned*) { errno = ENOTCONN; return -1; }
+static long stub_sendto(int, const void*, size_t, int, const void*, unsigned) {
+    errno = ENOTSOCK; return -1;
+}
+static long stub_sendfile(int, int, void*, size_t) { errno = ENOSYS; return -1; }
+
+// basename. <libgen.h> declares it but this libc doesn't implement it, so the
+// table entry linked against nothing. POSIX semantics: last path component,
+// "." for an empty or null path, and trailing slashes ignored.
+static char* stub_basename(char* path) {
+    static char dot[] = ".";
+    if (!path || !*path) return dot;
+    size_t n = strlen(path);
+    while (n > 1 && path[n - 1] == '/') path[--n] = '\0';   // strip trailing /
+    char* slash = strrchr(path, '/');
+    if (!slash) return path;
+    if (slash[1]) return slash + 1;
+    return slash == path ? path : dot;                       // "/" -> "/"
+}
+
+// drand48 family. Not exposed by this toolchain's headers, and games use it
+// for ordinary pseudo-randomness rather than anything reproducible across
+// platforms, so the standard 48-bit LCG is implemented directly.
+static unsigned long long g_rand48 = 0x1234ABCD330EULL;
+static void stub_srand48(long seed) {
+    g_rand48 = ((unsigned long long)(unsigned long)seed << 16) | 0x330EULL;
+}
+static long stub_lrand48(void) {
+    g_rand48 = (0x5DEECE66DULL * g_rand48 + 0xB) & 0xFFFFFFFFFFFFULL;
+    return (long)(g_rand48 >> 17);          // top 31 bits, as specified
+}
+static long stub_mrand48(void) {
+    g_rand48 = (0x5DEECE66DULL * g_rand48 + 0xB) & 0xFFFFFFFFFFFFULL;
+    return (long)(int)(g_rand48 >> 16);     // signed 32-bit
+}
+static double stub_drand48(void) {
+    g_rand48 = (0x5DEECE66DULL * g_rand48 + 0xB) & 0xFFFFFFFFFFFFULL;
+    return (double)g_rand48 / 281474976710656.0;   // / 2^48
+}
+
+// Process identity. Horizon has no users or groups; report root consistently
+// rather than inventing an id that some check might treat as unprivileged.
+static unsigned stub_getegid(void) { return 0; }
+static unsigned stub_geteuid(void) { return 0; }
+static int stub_getpwuid_r(unsigned, void*, char*, size_t, void** result) {
+    if (result) *result = nullptr;
+    return 0;                       // "no such user" — not an error
+}
+
+// CPU affinity. The Switch does pin threads to cores, but not through this
+// interface, and a game asking is only ever optimising. Report success with an
+// empty set rather than failing a call it doesn't check.
+static int stub_sched_getaffinity(int, size_t len, void* mask) {
+    if (mask && len) memset(mask, 0, len);
+    return 0;
+}
+static int stub_sched_setaffinity(int, size_t, const void*) { return 0; }
+
+// Sockets a game may reference but can't meaningfully use here.
+static int stub_socketpair(int, int, int, int sv[2]) {
+    if (sv) { sv[0] = -1; sv[1] = -1; }
+    errno = EAFNOSUPPORT;
+    return -1;
+}
+static unsigned stub_if_nametoindex(const char*) { return 0; }
+
+// Filesystem calls newlib doesn't carry. Failing loudly here is better than a
+// silent no-op: a game that relies on a hard link and gets a lie will corrupt
+// its own state later, whereas EPERM is a case it already has to handle.
+static int stub_link(const char*, const char*)      { errno = EPERM;  return -1; }
+static int stub_futimens(int, const void*)          { return 0; }   // timestamps are cosmetic
+
 struct ShimEntry { const char* name; void* ptr; };
 
 static const ShimEntry g_shims[] = {
+    // ── zlib (linked; games decompress their own assets with it) ───────────
+    {"inflate",         (void*)inflate},
+    {"inflateEnd",      (void*)inflateEnd},
+    {"inflateInit_",    (void*)inflateInit_},
+    {"inflateInit2_",   (void*)inflateInit2_},
+    {"inflateReset",    (void*)inflateReset},
+    {"deflate",         (void*)deflate},
+    {"deflateEnd",      (void*)deflateEnd},
+    {"deflateInit_",    (void*)deflateInit_},
+    {"deflateInit2_",   (void*)deflateInit2_},
+    {"crc32",           (void*)crc32},
+    {"adler32",         (void*)adler32},
+    {"uncompress",      (void*)uncompress},
+    {"compress",        (void*)compress},
+
+    // ── libc the toolchain already provides ────────────────────────────────
+    {"strcspn",         (void*)strcspn},
+    {"memrchr",         (void*)stub_memrchr},
+    {"sincos",          (void*)stub_sincos},
+    {"setvbuf",         (void*)setvbuf},
+    {"basename",        (void*)stub_basename},
+    {"lldiv",           (void*)lldiv},
+    {"logb",            (void*)logb},
+    {"scalbn",          (void*)scalbn},
+    {"srand48",         (void*)stub_srand48},
+    {"lrand48",         (void*)stub_lrand48},
+    {"mrand48",         (void*)stub_mrand48},
+    {"drand48",         (void*)stub_drand48},
+    {"fnmatch",         (void*)fnmatch},
+
+    // ── Android / POSIX surface with no Horizon equivalent ─────────────────
+    {"__system_property_find", (void*)stub_system_property_find},
+    {"__system_property_read", (void*)stub_system_property_read},
+    {"getegid",         (void*)stub_getegid},
+    {"geteuid",         (void*)stub_geteuid},
+    {"getpwuid_r",      (void*)stub_getpwuid_r},
+    {"sched_getaffinity", (void*)stub_sched_getaffinity},
+    {"sched_setaffinity", (void*)stub_sched_setaffinity},
+    {"socketpair",      (void*)stub_socketpair},
+    {"getpeername",     (void*)stub_getpeername},
+    {"sendto",          (void*)stub_sendto},
+    {"sendfile",        (void*)stub_sendfile},
+    {"sem_timedwait",   (void*)stub_sem_timedwait},
+    {"if_nametoindex",  (void*)stub_if_nametoindex},
+    {"link",            (void*)stub_link},
+    {"futimens",        (void*)stub_futimens},
+
     // ── liblog ──────────────────────────────────────────────────────────────
     {"__android_log_print",     (void*)android_log_print},
     {"__android_log_write",     (void*)android_log_write},
@@ -1515,6 +1683,7 @@ static const ShimEntry g_shims[] = {
     {"eglCreatePbufferSurface",(void*)eglCreatePbufferSurface},
     {"eglDestroySurface",   (void*)eglDestroySurface},
     {"eglMakeCurrent",      (void*)w_eglMakeCurrent},
+    {"eglSurfaceAttrib", (void*)eglSurfaceAttrib},
     {"eglSwapBuffers",      (void*)eglSwapBuffers},
     {"eglSwapInterval",     (void*)eglSwapInterval},
 
