@@ -873,36 +873,56 @@ struct App {
 
     // ── Tracked caps text (CSS letter-spacing) ──────────────────────────
     // Splits on UTF-8 boundaries so non-ASCII game titles don't get mangled.
-    static std::vector<std::string> utf8Glyphs(const std::string& s) {
-        std::vector<std::string> out;
-        for (size_t i = 0; i < s.size();) {
-            unsigned char c = (unsigned char)s[i];
-            size_t n = (c < 0x80) ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : (c >> 3) == 0x1E ? 4 : 1;
-            if (i + n > s.size()) n = 1;
-            out.push_back(s.substr(i, n));
-            i += n;
-        }
-        return out;
+    // Text helpers that do not allocate.
+    //
+    // These built a std::vector<std::string> with one string per letter, twice
+    // per caption — once to measure and once to draw — plus a std::string for
+    // the uppercase copy. Around fifty heap allocations a frame, from our own
+    // code rather than SDL's, on the one screen that has to keep running while
+    // the game's constructors are upsetting the allocator. Pre-rendering the
+    // glyphs removed SDL_ttf's allocations and moved the wedge from frame 47 to
+    // frame 160; these are what was left.
+    static int utf8Len(const char* p, size_t remaining) {
+        unsigned char c = (unsigned char)*p;
+        int n = (c < 0x80) ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3
+              : (c >> 3) == 0x1E ? 4 : 1;
+        return ((size_t)n > remaining) ? 1 : n;
     }
-    int trackedWidth(TTF_Font* f, const std::string& s, int track) {
-        if (!f) return 0;
-        auto gl = utf8Glyphs(s);
+    int trackedWidth(TTF_Font* f, const char* s, int track) {
+        if (!f || !s) return 0;
+        size_t len = strlen(s);
         int total = 0;
-        for (auto& g : gl) { int w = 0, h = 0; TTF_SizeUTF8(f, g.c_str(), &w, &h); total += w + track; }
+        for (size_t i = 0; i < len;) {
+            int n = utf8Len(s + i, len - i);
+            char g[5] = {}; memcpy(g, s + i, (size_t)n);
+            int w = 0, h = 0; TTF_SizeUTF8(f, g, &w, &h);
+            total += w + track; i += (size_t)n;
+        }
         return total > 0 ? total - track : 0;
     }
-    void drawTrackedCentered(TTF_Font* f, const std::string& s, SDL_Color col,
+    void drawTrackedCentered(TTF_Font* f, const char* s, SDL_Color col,
                              int cx, int y, int track) {
-        if (!f || s.empty()) return;
+        if (!f || !s || !*s) return;
+        size_t len = strlen(s);
         int x = cx - trackedWidth(f, s, track) / 2;
-        for (auto& g : utf8Glyphs(s)) {
-            if (g == " ") { int w = 0, h = 0; TTF_SizeUTF8(f, " ", &w, &h); x += w + track; continue; }
+        for (size_t i = 0; i < len;) {
+            int n = utf8Len(s + i, len - i);
+            char g[5] = {}; memcpy(g, s + i, (size_t)n);
+            i += (size_t)n;
+            if (g[0] == ' ' && n == 1) {
+                int w = 0, h = 0; TTF_SizeUTF8(f, " ", &w, &h);
+                x += w + track; continue;
+            }
             x += drawText(f, g, col, x, y) + track;
         }
     }
-    static std::string upperAscii(std::string s) {
-        for (char& c : s) c = (char)toupper((unsigned char)c);
-        return s;
+    // Uppercase into a caller-supplied buffer; no string is created.
+    static void upperAsciiInto(char* dst, size_t cap, const char* src) {
+        if (!dst || !cap) return;
+        size_t i = 0;
+        for (; src && src[i] && i + 1 < cap; i++)
+            dst[i] = (char)toupper((unsigned char)src[i]);
+        dst[i] = '\0';
     }
 
     // Layout, transcribed from the design's centred flex column.
@@ -1081,13 +1101,19 @@ struct App {
 
         mainPhase("draw/caption");
         // ── Caption: game title over stage text + blinking dots ──
-        drawTrackedCentered(fBootT,
-                            launchTitle.empty() ? "NOW LOADING" : upperAscii(launchTitle),
-                            bootTitle(), SW / 2, TITLE_Y, 6);
+        static char titleBuf[96];
+        if (launchTitle.empty()) snprintf(titleBuf, sizeof(titleBuf), "NOW LOADING");
+        else                     upperAsciiInto(titleBuf, sizeof(titleBuf), launchTitle.c_str());
+        drawTrackedCentered(fBootT, titleBuf, bootTitle(), SW / 2, TITLE_Y, 6);
 
         mainPhase("draw/stageText");
-        std::string status = g_ui_stage[0] ? upperAscii(g_ui_stage) : "READING GAME DATA";
-        if (elapsed_s >= 30) status += " — STILL WORKING";
+        static char status[128];
+        if (g_ui_stage[0]) upperAsciiInto(status, sizeof(status), g_ui_stage);
+        else               snprintf(status, sizeof(status), "READING GAME DATA");
+        if (elapsed_s >= 30) {
+            size_t sl = strlen(status);
+            snprintf(status + sl, sizeof(status) - sl, " - STILL WORKING");
+        }
         const SDL_Color statCol = {0, 102, 51, 140};
         int stW   = trackedWidth(fBootS, status, 4);
         int dotsW = 3 * 5 + 2 * 5;
