@@ -255,6 +255,10 @@ int          elfGetCtorFaultCount(void);
 // fault count: frees that fault without passing through here were bypassing it.
 unsigned long shimFreeCallCount(void);
 
+// Tell the loader what the game's manifest asked for, before launchApk.
+// Raw android:screenOrientation constant; -1 for unspecified.
+void         loaderSetScreenOrient(int screen_orientation);
+
 // Called by jni_env.cpp when the game signals its own loading/splash screen
 // is done (splashScreenHasCompleted). Hides the Viridite branding
 // overlay drawn over the game's loading screen (see loader.cpp).

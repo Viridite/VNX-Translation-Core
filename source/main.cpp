@@ -1123,6 +1123,8 @@ struct App {
         const char* verb = skipInstall ? "Launching (cached)" : "Installing + Launching";
         strncpy(g_ui_stage, verb, sizeof(g_ui_stage) - 1);
 
+        loaderSetScreenOrient(apk.screenOrient);
+
         LoaderCtx ctx;
         ctx.apk_path    = apk.path;
         ctx.pkg_name    = pkg;

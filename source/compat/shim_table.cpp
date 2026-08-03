@@ -1,4 +1,5 @@
 #include "compat/loader.h"
+#include "compat/orientation.h"
 #include "compat/android.h"
 #include "compat/sensors.h"
 #include <switch.h>
@@ -984,6 +985,43 @@ static ssize_t stub_getrandom(void* buf, size_t len, unsigned) {
 }
 static int  stub_dl_iterate_phdr(void*, void*) { return 0; }
 
+// ─── Letterboxing a portrait game onto a landscape panel ────────────────────
+// The game sets its own viewport and scissor from the window size we reported,
+// so it draws a correctly-shaped picture — in the bottom-left corner. These
+// three shims shift its rendering into the content rect and keep it there.
+//
+// glClear is the one that matters most: a clear ignores the viewport entirely
+// and would wipe the black bars with the game's background colour, which is
+// how a "letterboxed" game ends up with coloured bars that flicker. Scissoring
+// the clear to the content rect is what actually keeps the bars black.
+static void w_glViewport(GLint x, GLint y, GLsizei w, GLsizei h) {
+    const Presentation& p = orientGet();
+    glViewport(x + p.content_x, y + p.content_y, w, h);
+}
+
+static void w_glScissor(GLint x, GLint y, GLsizei w, GLsizei h) {
+    const Presentation& p = orientGet();
+    glScissor(x + p.content_x, y + p.content_y, w, h);
+}
+
+static void w_glClear(GLbitfield mask) {
+    const Presentation& p = orientGet();
+    if (!p.pillarboxed) { glClear(mask); return; }
+
+    // Confine the clear, then put the scissor box back exactly as the game left
+    // it — it may be mid-frame and relying on it.
+    GLboolean had = glIsEnabled(GL_SCISSOR_TEST);
+    GLint     box[4];
+    glGetIntegerv(GL_SCISSOR_BOX, box);
+
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(p.content_x, p.content_y, p.content_w, p.content_h);
+    glClear(mask);
+
+    glScissor(box[0], box[1], box[2], box[3]);
+    if (!had) glDisable(GL_SCISSOR_TEST);
+}
+
 // ─── Android-specific ────────────────────────────────────────────────────────
 static void stub_android_abort_msg(const char* msg) {
     compatLogFmt("android_abort_message: %s", msg ? msg : "");
@@ -1871,7 +1909,7 @@ static const ShimEntry g_shims[] = {
     {"glBufferData",        (void*)glBufferData},
     {"glBufferSubData",     (void*)glBufferSubData},
     {"glCheckFramebufferStatus",(void*)glCheckFramebufferStatus},
-    {"glClear",             (void*)glClear},
+    {"glClear",             (void*)w_glClear},
     {"glClearColor",        (void*)glClearColor},
     {"glClearDepthf",       (void*)glClearDepthf},
     {"glClearStencil",      (void*)glClearStencil},
@@ -1952,7 +1990,7 @@ static const ShimEntry g_shims[] = {
     {"glReleaseShaderCompiler",(void*)glReleaseShaderCompiler},
     {"glRenderbufferStorage",(void*)glRenderbufferStorage},
     {"glSampleCoverage",    (void*)glSampleCoverage},
-    {"glScissor",           (void*)glScissor},
+    {"glScissor",           (void*)w_glScissor},
     {"glShaderBinary",      (void*)glShaderBinary},
     {"glShaderSource",      (void*)glShaderSource},
     {"glStencilFunc",       (void*)glStencilFunc},
@@ -1997,7 +2035,7 @@ static const ShimEntry g_shims[] = {
     {"glVertexAttrib3fv",   (void*)glVertexAttrib3fv},
     {"glVertexAttrib4fv",   (void*)glVertexAttrib4fv},
     {"glVertexAttribPointer",(void*)glVertexAttribPointer},
-    {"glViewport",          (void*)glViewport},
+    {"glViewport",          (void*)w_glViewport},
 
     // ── GLES 3 passthrough ────────────────────────────────────────────────────
     {"glBeginQuery",           (void*)glBeginQuery},

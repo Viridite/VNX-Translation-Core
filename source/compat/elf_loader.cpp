@@ -412,27 +412,50 @@ void* LoadedSo::findSym(const char* name) const {
 // ─── Global symbol resolver ───────────────────────────────────────────────────
 // Checks our shim table FIRST so Switch-compatible implementations always win
 // over any Bionic copies embedded in libapplovin.so / libquack.so.
+// Allocator entry points are worth saying out loud. sh_free counted 10 calls
+// against 34 faults, so the game is reaching newlib's free without passing
+// through the shim, and where each of these actually binds is the difference
+// between "the table was bypassed" and "something else calls free directly".
+static bool isAllocSym(const char* n) {
+    return strcmp(n, "free") == 0 || strcmp(n, "malloc") == 0 ||
+           strcmp(n, "realloc") == 0 || strcmp(n, "calloc") == 0 ||
+           strcmp(n, "_ZdlPv") == 0 || strcmp(n, "_ZdaPv") == 0 ||
+           strcmp(n, "_ZdlPvm") == 0 || strcmp(n, "_Znwm") == 0 ||
+           strcmp(n, "_Znam") == 0;
+}
+
 static void* resolveSymbol(const char* name) {
     if (!name || !name[0]) return nullptr;
+    const bool trace = isAllocSym(name);
 
     // Shim table takes priority — our implementations override any game-library
     // copies of pthread_*, libc functions, GLES, EGL, libandroid, etc.
     void* shim = shimResolve(name);
-    if (shim) return shim;
+    if (shim) {
+        if (trace) compatLogFmt("bind: %s -> shim %p", name, shim);
+        return shim;
+    }
 
     // Then the game's own libraries — a game that ships its own libc (cocos2d-x
     // titles like Hill Climb Racing statically link newlib) MUST keep using it.
     for (LoadedSo* so : g_loaded_sos) {
         void* p = so->findSym(name);
-        if (p) return p;
+        if (p) {
+            if (trace) compatLogFmt("bind: %s -> %s %p", name, so->path.c_str(), p);
+            return p;
+        }
     }
 
     // Last: Unity/IL2CPP libc gap fillers. Only reached when neither the shim
     // overrides nor any game library provides the symbol — i.e. exactly the
     // undefined imports of libunity/libil2cpp, never a game's own copies.
     void* fb = shimResolveFallback(name);
-    if (fb) return fb;
+    if (fb) {
+        if (trace) compatLogFmt("bind: %s -> fallback %p", name, fb);
+        return fb;
+    }
 
+    if (trace) compatLogFmt("bind: %s -> UNRESOLVED", name);
     return nullptr;
 }
 

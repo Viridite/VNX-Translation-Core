@@ -1,4 +1,12 @@
 #include "compat/loader.h"
+#include "compat/orientation.h"
+
+// android:screenOrientation for the game being launched. Set by the caller
+// before launchApk, because the manifest is parsed up in the UI layer where
+// the ApkInfo lives and re-reading the APK here just to get one integer would
+// be wasteful.
+static int g_screen_orient = -1;
+void loaderSetScreenOrient(int v) { g_screen_orient = v; }
 #include "compat/android.h"
 #include "compat/sha256.h"
 #include "build_number.h"
@@ -1055,11 +1063,32 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
     }
 
     // ── 6. Set up ANativeWindow (no EGL here — main thread does that) ────────
+    // The window is whatever the orientation rules decided, not a fixed
+    // 1280x720: a portrait game gets a portrait-shaped window and is never
+    // told that the panel it is on is the wrong way round.
+    {
+        GameOrient want = GameOrient::Unspecified;
+        switch (g_screen_orient) {           // Android screenOrientation values
+            case 0: case 6: case 8: case 11: want = GameOrient::Landscape;       break;
+            case 1: case 7: case 9: case 12: want = GameOrient::Portrait;        break;
+            case 4: case 10:                 want = GameOrient::Sensor;          break;
+            default:                         want = GameOrient::Unspecified;     break;
+        }
+        // sensorLandscape/sensorPortrait keep their axis but may flip within
+        // it; for our purposes that is the same as the fixed orientation.
+        if (g_screen_orient == 6)  want = GameOrient::SensorLandscape;
+        if (g_screen_orient == 7)  want = GameOrient::SensorPortrait;
+        orientInit(want);
+    }
+    const Presentation& pres = orientGet();
+
     ANativeWindow* nwin = &g_compat.window;
-    nwin->width  = 1280;
-    nwin->height = 720;
+    nwin->width  = pres.content_w;
+    nwin->height = pres.content_h;
     nwin->format = 1; // RGBA_8888
     nwin->nwin   = nwindowGetDefault();
+    if (pres.transform)
+        nwindowSetTransform(nwin->nwin, pres.transform);
 
     // ── 7. Set up ANativeActivity ────────────────────────────────────────────
     // Store paths durably so the pointers remain valid after this function returns.
@@ -1741,6 +1770,19 @@ void runGameOnMainThread(void* game_so_ptr,
     NativeRender_fn nativeRender = (NativeRender_fn)so->findSym(
         "Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeRender");
 
+    // SDL reports fingers in 0..1 of the physical panel. The game thinks it is
+    // on a screen the size of the content rect, so a tap has to be moved into
+    // that rect — otherwise every touch in a pillarboxed portrait game lands
+    // several hundred pixels to the right of where the player aimed.
+    auto mapFinger = [](float fx, float fy, float* ox, float* oy) {
+        const Presentation& p = orientGet();
+        int sx = (int)(fx * p.screen_w + 0.5f);
+        int sy = (int)(fy * p.screen_h + 0.5f);
+        orientMapTouch(&sx, &sy);
+        *ox = (float)sx;
+        *oy = (float)sy;
+    };
+
     // ─── Touch input: SDL finger events → Cocos2dxRenderer touch natives ─────
     // The Java GLSurfaceView would normally deliver these; we call the game's
     // registered native entry points directly. Begin/End take a single id+xy;
@@ -1922,16 +1964,19 @@ void runGameOnMainThread(void* game_so_ptr,
                     if (ev.type == SDL_JOYBUTTONDOWN && ev.jbutton.button == 1 /*B*/ &&
                         keyDown && !ctrlConn)
                         keyDown(env, obj, 4 /*AKEYCODE_BACK*/);
-                    if (ev.type == SDL_FINGERDOWN && touchBegin)
-                        touchBegin(env, obj, (jint)ev.tfinger.fingerId,
-                                   ev.tfinger.x * 1280.0f, ev.tfinger.y * 720.0f);
-                    if (ev.type == SDL_FINGERUP && touchEnd)
-                        touchEnd(env, obj, (jint)ev.tfinger.fingerId,
-                                 ev.tfinger.x * 1280.0f, ev.tfinger.y * 720.0f);
+                    if (ev.type == SDL_FINGERDOWN && touchBegin) {
+                        float mx, my; mapFinger(ev.tfinger.x, ev.tfinger.y, &mx, &my);
+                        touchBegin(env, obj, (jint)ev.tfinger.fingerId, mx, my);
+                    }
+                    if (ev.type == SDL_FINGERUP && touchEnd) {
+                        float mx, my; mapFinger(ev.tfinger.x, ev.tfinger.y, &mx, &my);
+                        touchEnd(env, obj, (jint)ev.tfinger.fingerId, mx, my);
+                    }
                     if (ev.type == SDL_FINGERMOTION && touchMove) {
+                        float mx, my; mapFinger(ev.tfinger.x, ev.tfinger.y, &mx, &my);
                         IntArr1   ids = {1, {(jint)ev.tfinger.fingerId}};
-                        FloatArr1 xs  = {1, {ev.tfinger.x * 1280.0f}};
-                        FloatArr1 ys  = {1, {ev.tfinger.y * 720.0f}};
+                        FloatArr1 xs  = {1, {mx}};
+                        FloatArr1 ys  = {1, {my}};
                         touchMove(env, obj, &ids, &xs, &ys);
                     }
                 }
@@ -1956,6 +2001,23 @@ void runGameOnMainThread(void* game_so_ptr,
                 // Swap buffers (Cocos2d-x doesn't call eglSwapBuffers itself)
                 if (g_egl_display != EGL_NO_DISPLAY && g_egl_surface != EGL_NO_SURFACE)
                     eglSwapBuffers(g_egl_display, g_egl_surface);
+
+                    // Docking, undocking and clipping the Joy-Cons on or off
+                    // all change the rules, and all of them happen mid-game.
+                    // Re-checking once a frame is cheap — orientUpdate only
+                    // reads HID state and returns false when nothing moved.
+                    if (orientUpdate()) {
+                        const Presentation& np = orientGet();
+                        g_compat.window.width  = np.content_w;
+                        g_compat.window.height = np.content_h;
+                        nwindowSetTransform(nwindowGetDefault(), np.transform);
+                        // A game that queried the window size once will not ask
+                        // again, so anything that resizes mid-run keeps drawing
+                        // at its original shape until it next queries. The
+                        // letterbox shims keep that inside the content rect
+                        // regardless, so the worst case is bars of the wrong
+                        // width rather than a broken picture.
+                    }
                 else if (win)
                     SDL_GL_SwapWindow(win);
 

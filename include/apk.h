@@ -22,6 +22,9 @@ struct ApkInfo {
     uint64_t    fileSizeBytes = 0;
     bool        installed     = false;  // true if already extracted to games dir
     ApkArch     arch          = ApkArch::Unknown;
+    // android:screenOrientation from the launcher activity; -1 = unspecified.
+    // Raw Android constant, mapped to a GameOrient by the orientation code.
+    int         screenOrient  = -1;
 };
 
 ApkInfo              parseApk       (const std::string& path);
