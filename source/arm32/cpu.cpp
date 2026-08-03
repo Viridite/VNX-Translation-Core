@@ -78,6 +78,32 @@ static inline void traceBranch(uint32_t from, uint32_t to, bool was_t, bool now_
     s_br_n++;
 }
 
+// Report each distinct unimplemented opcode once, with full context, and then
+// only count it. Now that a halted constructor is skipped rather than ending
+// the run, the same instruction can be reached hundreds of times — and the
+// hundredth occurrence says nothing the first did not. What matters is how
+// many *different* things are missing.
+static uint32_t s_unimpl_seen[24];
+static uint32_t s_unimpl_hits[24];
+static uint32_t s_unimpl_n = 0;
+
+bool cpuNoteUnimpl(uint32_t key) {
+    for (uint32_t i = 0; i < s_unimpl_n; i++)
+        if (s_unimpl_seen[i] == key) { s_unimpl_hits[i]++; return false; }
+    if (s_unimpl_n >= 24) return false;
+    s_unimpl_seen[s_unimpl_n] = key;
+    s_unimpl_hits[s_unimpl_n] = 1;
+    s_unimpl_n++;
+    return true;                     // first sighting — worth the full report
+}
+
+void cpuDumpUnimplSummary(void) {
+    if (!s_unimpl_n) { compatLog("arm32: no unimplemented instructions reached"); return; }
+    compatLogFmt("arm32: %u distinct unimplemented opcode(s):", s_unimpl_n);
+    for (uint32_t i = 0; i < s_unimpl_n; i++)
+        compatLogFmt("arm32:   0x%08x  x%u", s_unimpl_seen[i], s_unimpl_hits[i]);
+}
+
 void cpuDumpBranches(void) {
     compatLog("arm32:   last control transfers (oldest first):");
     uint32_t start = (s_br_n > 16) ? s_br_n - 16 : 0;
@@ -496,9 +522,11 @@ static void stepArm(CpuState& c) {
         return;
     }
 
-    compatLogFmt("arm32: UNIMPL ARM insn=0x%08x pc=0x%x", insn, pc);
-    logUnimplContext(pc);
-    cpuDumpBranches();
+    if (cpuNoteUnimpl(insn)) {
+        compatLogFmt("arm32: UNIMPL ARM insn=0x%08x pc=0x%x", insn, pc);
+        logUnimplContext(pc);
+        cpuDumpBranches();
+    }
     c.halt = true; c.halt_pc = pc;
 }
 
@@ -800,9 +828,11 @@ static void stepThumb32(CpuState& c, uint32_t pc, uint16_t hw1) {
         return;
     }
 
-    compatLogFmt("arm32: UNIMPL Thumb2 %04x %04x pc=0x%x", hw1, hw2, pc);
-    logUnimplContext(pc);
-    cpuDumpBranches();
+    if (cpuNoteUnimpl(((uint32_t)hw1 << 16) | hw2)) {
+        compatLogFmt("arm32: UNIMPL Thumb2 %04x %04x pc=0x%x", hw1, hw2, pc);
+        logUnimplContext(pc);
+        cpuDumpBranches();
+    }
     c.halt = true; c.halt_pc = pc;
 }
 

@@ -64,6 +64,9 @@ uint32_t elf32Sym(const char* name);
 // `cpu`, may allocate/translate, writes the result to r0/r1, returns to LR.
 void bridgeCall(CpuState& cpu, uint32_t sentinel);
 // Register the name a sentinel maps to (called during import resolution).
+void     cpuDumpBranches(void);
+void     cpuDumpUnimplSummary(void);
+
 uint32_t bridgeRegister(const char* name);
 // Storage for an imported DATA symbol, or 0 if it is not one we know.
 uint32_t bridgeRegisterData(const char* name);

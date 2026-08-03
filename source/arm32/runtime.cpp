@@ -58,14 +58,43 @@ int run(const char* main_so_host_path, const char* pkg) {
         if (cpu.halt) return -3;
     }
     // DT_INIT_ARRAY (static constructors)
+    // Skip a constructor that halts rather than stopping the run.
+    //
+    // Stopping at the first one means every test cycle reveals exactly one
+    // problem, and each costs a build, a copy to the card and a launch. The
+    // 64-bit path already recovers from a faulting constructor and carries on,
+    // which is how we learned that 155 of libunity's fail for one reason
+    // rather than finding them one release at a time.
+    //
+    // A skipped constructor leaves its object uninitialised, so the game is
+    // not in a good state afterwards — but it was not going to run either way,
+    // and knowing whether the next four hundred hit the same instruction or
+    // four hundred different ones is worth far more than a clean stop.
+    uint32_t ran = 0, halted = 0;
     for (uint32_t i = 0; i < elf.init_count; i++) {
         uint32_t fn = *(uint32_t*)toHost(elf.init_array + i*4);
         if (!fn || fn == 0xffffffff) continue;
         compatLogFmt("arm32: ctor[%u/%u] @0x%x", i+1, elf.init_count, fn);
         callGuest(cpu, fn);
-        if (cpu.halt) { compatLogFmt("arm32: ctor halted, stopping at %u", i); return -4; }
+        if (cpu.halt) {
+            halted++;
+            compatLogFmt("arm32: ctor[%u] halted at 0x%x — skipped", i+1, cpu.halt_pc);
+            cpu.halt = false;
+            // Give the next one a clean stack. The halted call left whatever
+            // depth it had reached, and 479 abandoned frames would run the
+            // guest stack into the heap.
+            cpu.r[13] = A32_STACK_TOP;
+            if (halted >= 64) {
+                compatLogFmt("arm32: %u constructors halted — stopping, the "
+                             "problem is systemic rather than per-constructor", halted);
+                break;
+            }
+        } else {
+            ran++;
+        }
     }
-    compatLog("arm32: constructors done");
+    compatLogFmt("arm32: constructors done — %u ran, %u halted", ran, halted);
+    cpuDumpUnimplSummary();
 
     // JNI_OnLoad(JavaVM*, void*) — pass 0/0 for now; the JNI object model needs
     // wiring through the bridge before this does anything useful.
