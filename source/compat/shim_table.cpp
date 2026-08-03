@@ -344,7 +344,24 @@ static bool looksLikeNewlibChunk(void* p) {
 // all. Zero SKIP lines is ambiguous on its own: it means either every pointer
 // passed validation, or nothing ever came through here.
 volatile unsigned long g_sh_free_calls = 0;
+volatile unsigned long g_sh_malloc_calls = 0;
+volatile unsigned long g_sh_calloc_calls = 0;
+volatile unsigned long g_sh_realloc_calls = 0;
 unsigned long shimFreeCallCount(void) { return g_sh_free_calls; }
+void shimAllocCounts(unsigned long* m, unsigned long* c, unsigned long* r, unsigned long* f) {
+    if (m) *m = g_sh_malloc_calls;
+    if (c) *c = g_sh_calloc_calls;
+    if (r) *r = g_sh_realloc_calls;
+    if (f) *f = g_sh_free_calls;
+}
+
+// malloc and calloc were pointing straight at newlib, so nothing counted them.
+// Knowing how many allocations the game makes against how many frees reach us
+// is the difference between "the game barely allocates through libc" and "it
+// allocates through libc and frees through something else entirely" — and only
+// the second explains a fault in _free_r with our free shim barely called.
+static void* sh_malloc(size_t n) { g_sh_malloc_calls++; return malloc(n); }
+static void* sh_calloc(size_t a, size_t b) { g_sh_calloc_calls++; return calloc(a, b); }
 
 static void sh_free(void* p) {
     if (!p) return;
@@ -375,6 +392,7 @@ static void sh_free(void* p) {
     free(p);
 }
 static void* sh_realloc(void* p, size_t n) {
+    g_sh_realloc_calls++;
     if (p && (!memIsHeap(p) || !looksLikeNewlibChunk(p))) {
         compatLogFmt("realloc: unowned ptr %p — returning fresh block", p);
         return malloc(n);
@@ -1612,9 +1630,9 @@ static const ShimEntry g_shims[] = {
     {"__android_log_buf_print", (void*)android_log_buf_print},
 
     // ── libc / newlib passthrough ────────────────────────────────────────────
-    {"malloc",      (void*)malloc},
+    {"malloc",      (void*)sh_malloc},
     {"free",        (void*)sh_free},
-    {"calloc",      (void*)calloc},
+    {"calloc",      (void*)sh_calloc},
     {"realloc",     (void*)sh_realloc},
     {"memalign",    (void*)memalign},
     {"posix_memalign",(void*)stub_posix_memalign},

@@ -85,18 +85,33 @@ void orientInit(GameOrient want) {
     const HidNpadIdType ids[] = { HidNpadIdType_Handheld, HidNpadIdType_No1 };
     hidSetSupportedNpadIdType(ids, 2);
 
-    Result rc = hidGetSixAxisSensorHandles(g_sensors, 2, HidNpadIdType_Handheld,
-                                           HidNpadStyleTag_NpadHandheld);
-    if (R_SUCCEEDED(rc)) {
-        Result rs = hidStartSixAxisSensor(g_sensors[0]);
-        if (R_SUCCEEDED(rs)) {
-            hidStartSixAxisSensor(g_sensors[1]);
-            g_have_sensor = true;
-        } else {
-            compatLogFmt("orientation: hidStartSixAxisSensor failed rc=0x%x", rs);
+    // libnx validates the (id, style, count) triple and rejects mismatches with
+    // BadInput — which is what the first attempt got, so the count it wants is
+    // not the one that seemed obvious. Try the plausible shapes rather than
+    // guessing: handheld carries two Joy-Cons, but the API may only hand back
+    // one handle for the pair.
+    struct Attempt { s32 count; HidNpadIdType id; HidNpadStyleTag style; const char* what; };
+    static const Attempt kAttempts[] = {
+        {2, HidNpadIdType_Handheld, HidNpadStyleTag_NpadHandheld, "handheld x2"},
+        {1, HidNpadIdType_Handheld, HidNpadStyleTag_NpadHandheld, "handheld x1"},
+        {2, HidNpadIdType_No1,      HidNpadStyleTag_NpadJoyDual,  "joydual x2"},
+        {1, HidNpadIdType_No1,      HidNpadStyleTag_NpadFullKey,  "fullkey x1"},
+    };
+    for (const Attempt& a : kAttempts) {
+        Result rc = hidGetSixAxisSensorHandles(g_sensors, a.count, a.id, a.style);
+        if (R_FAILED(rc)) {
+            compatLogFmt("orientation: sensor handles (%s) rc=0x%x", a.what, rc);
+            continue;
         }
-    } else {
-        compatLogFmt("orientation: hidGetSixAxisSensorHandles failed rc=0x%x", rc);
+        Result rs = hidStartSixAxisSensor(g_sensors[0]);
+        if (R_FAILED(rs)) {
+            compatLogFmt("orientation: sensor start (%s) rc=0x%x", a.what, rs);
+            continue;
+        }
+        if (a.count > 1) hidStartSixAxisSensor(g_sensors[1]);
+        g_have_sensor = true;
+        compatLogFmt("orientation: sensor acquired (%s)", a.what);
+        break;
     }
 
     const char* w = "unspecified";

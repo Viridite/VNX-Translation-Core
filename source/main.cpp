@@ -152,16 +152,18 @@ static void watchdogThreadFn(void*) {
         if (g_watchdog_stop.load(std::memory_order_acquire)) break;
         uint64_t f = g_main_frames.load(std::memory_order_relaxed);
         if (f == last) {
-            char buf[192];
+            char buf[224];
+            unsigned long a_m = 0, a_c = 0, a_r = 0, a_f = 0;
+            shimAllocCounts(&a_m, &a_c, &a_r, &a_f);
             // compatLogRaw, not compatLog: if the main thread wedged while
             // holding the log mutex, the ordinary path would block here too
             // and the watchdog would die silently along with it.
             snprintf(buf, sizeof(buf),
                      "WATCHDOG: main thread has not advanced for %ds — "
-                     "wedged in '%s' (frame %llu, %d ctor faults, %lu free-shim calls)",
+                     "wedged in '%s' (frame %llu, %d ctor faults; libc m=%lu c=%lu r=%lu f=%lu)",
                      (stuck + 1) * 2, g_main_phase.load(std::memory_order_relaxed),
                      (unsigned long long)f, elfGetCtorFaultCount(),
-                     shimFreeCallCount());
+                     a_m, a_c, a_r, a_f);
             compatLogRaw(buf);
             if (stuck == 0) probeAllocator();
             stuck++;

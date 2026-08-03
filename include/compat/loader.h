@@ -254,6 +254,8 @@ int          elfGetCtorFaultCount(void);
 // How many times the game has reached our free() shim. Read together with the
 // fault count: frees that fault without passing through here were bypassing it.
 unsigned long shimFreeCallCount(void);
+void          shimAllocCounts(unsigned long* malloc_n, unsigned long* calloc_n,
+                              unsigned long* realloc_n, unsigned long* free_n);
 
 // Tell the loader what the game's manifest asked for, before launchApk.
 // Raw android:screenOrientation constant; -1 for unspecified.
