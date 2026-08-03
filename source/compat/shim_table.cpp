@@ -434,7 +434,34 @@ bool shimHeapCheck(char* why, size_t whysz) {
     // the whole walk into an immediate "clean" — say so rather than pretend.
     if (arena_end < 0x1000) { g_walk_stop = "sbrk returned nothing"; return true; }
 
+    // Start at the bottom of the arena, not at the anchor. The anchor is
+    // allocated in main(), but our own static constructors run before main()
+    // and allocate — so everything below it has never been walked, and that is
+    // exactly where a chunk the game's malloc later consolidates could be
+    // sitting. The last run covered 68000 chunks cleanly and still faulted,
+    // which is what a blind spot looks like rather than an absent bug.
+    //
+    // newlib sbrk's from the base of the heap region, so the first chunk is at
+    // or just above it; step forward until one validates rather than assuming
+    // an exact offset.
     const NlChunk* c = (const NlChunk*)((char*)g_heap_anchor - 16);
+    {
+        uintptr_t lo = g_heap_lo ? g_heap_lo : 0;
+        if (!lo) { MemoryInfo mi = {}; u32 pi = 0;
+                   if (R_SUCCEEDED(svcQueryMemory(&mi, &pi, (u64)(uintptr_t)g_heap_anchor)))
+                       lo = (uintptr_t)mi.addr; }
+        for (uintptr_t a = (lo + 15) & ~(uintptr_t)15;
+             a && a + 32 < (uintptr_t)g_heap_anchor && a < lo + 0x4000; a += 16) {
+            const NlChunk* t = (const NlChunk*)a;
+            size_t tsz = nlSize(t);
+            if (tsz < 32 || (tsz & 15) || a + tsz + 32 >= arena_end) continue;
+            const NlChunk* tn = (const NlChunk*)(a + tsz);
+            size_t nsz = nlSize(tn);
+            if (nsz < 32 || (nsz & 15)) continue;
+            c = t;              // plausible chunk followed by a plausible chunk
+            break;
+        }
+    }
     size_t prev_sz = 0;
     const NlChunk* prev_c = nullptr;
     for (int i = 0; i < 400000; i++) {
