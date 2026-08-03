@@ -1539,6 +1539,53 @@ int main(int argc, char** argv) {
              (argc > 1 && argv[1]) ? argv[1] : "(none)");
     logMsg(argvDbg);
 
+    // ── Dry-run self-test ────────────────────────────────────────────────────
+    // Invoked by the launcher with --selftest. Loads every installed game the
+    // way a real launch would, stops before any game code executes, writes what
+    // it found, and hands control straight back. Two handoffs and a launcher
+    // restart, which is fast, and the alternative — duplicating the ELF loader
+    // into the launcher so it could do this in-process — would mean the thing
+    // being tested is not the thing that runs.
+    if (argc > 1 && argv[1] && strcmp(argv[1], "--selftest") == 0) {
+        logMsg("core-x64: dry-run self-test");
+        elfSetDryRun(true);
+        FILE* out = fopen("sdmc:/Viridite/selftest_core.txt", "w");
+        if (out) fprintf(out, "v1\n");
+
+        for (const ApkInfo& a : app.apks) {
+            const std::string pkg = a.packageName.empty() ? a.filename : a.packageName;
+            if (!apkIsInstalled(pkg)) {
+                if (out) fprintf(out, "SKIP|%s|not installed\n", pkg.c_str());
+                continue;
+            }
+            app.launchTitle = a.appName.empty() ? pkg : a.appName;
+            app.noticeText  = "Dry-testing " + app.launchTitle + "...";
+            app.render();
+
+            elfResetCounts();
+            uint64_t t0 = armGetSystemTick();
+            LaunchResult r = launchApk(a.path, pkg, nullptr, /*skip_install=*/true);
+            uint32_t ms = (uint32_t)(((armGetSystemTick() - t0) * 1000) /
+                                     armGetSystemTickFreq());
+            if (out) {
+                if (r.game_so)
+                    fprintf(out, "PASS|%s|loaded in %ums, %d unresolved symbol(s)\n",
+                            pkg.c_str(), ms, elfGetUnresolvedCount());
+                else
+                    fprintf(out, "FAIL|%s|%s: %s\n", pkg.c_str(),
+                            r.errorStage.empty() ? "load failed" : r.errorStage.c_str(),
+                            r.errorDetail.c_str());
+            }
+        }
+        if (out) fclose(out);
+
+        // Straight back to the launcher, which reads the file and shows it.
+        envSetNextLoad("sdmc:/switch/Viridite.nro", "sdmc:/switch/Viridite.nro --selftest-results");
+        logMsg("core-x64: dry run done, returning to launcher");
+        app.cleanup();
+        return 0;
+    }
+
     const char* wantPkg = (argc > 1 && argv[1] && argv[1][0]) ? argv[1] : nullptr;
     int idx = -1;
 

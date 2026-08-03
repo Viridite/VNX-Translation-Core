@@ -273,6 +273,12 @@ void          shimHeapExtent(uint64_t* lo, uint64_t* hi, uint64_t* brk);
 // Raw android:screenOrientation constant; -1 for unspecified.
 void         loaderSetScreenOrient(int screen_orientation);
 
+// Load a game without running any of its code. Everything up to the
+// constructors is exercised; the constructors themselves are skipped, so this
+// tests the loader rather than the game.
+void         elfSetDryRun(bool on);
+int          elfGetUnresolvedCount(void);
+
 // Called by jni_env.cpp when the game signals its own loading/splash screen
 // is done (splashScreenHasCompleted). Hides the Viridite branding
 // overlay drawn over the game's loading screen (see loader.cpp).

@@ -276,7 +276,22 @@ const char* elfNearestSym(const LoadedSo* so, uint64_t vaddr, char* buf, size_t 
 // Run DT_INIT_ARRAY constructors stored by elfLoad.  Logs each entry before
 // calling it (and flushes via compatLog) so the crash site is visible in the
 // log when the Switch dies inside a constructor.
+// Dry run: load everything, execute nothing.
+//
+// Constructors are where the game's own code first runs, and where the fault
+// we are stuck on lives. Everything before them — extracting, mapping,
+// relocating, resolving every imported symbol — is the part that a change to
+// the loader can silently break, and it can be exercised in a couple of
+// seconds without the game ever getting control.
+static bool g_dry_run = false;
+void elfSetDryRun(bool on) { g_dry_run = on; }
+
 void elfRunCtors(LoadedSo* so, ProgressCb cb) {
+    if (g_dry_run) {
+        compatLogFmt("ELF: %s: dry run — %zu constructors NOT executed",
+                     so->path.c_str(), so->init_arr_count);
+        return;
+    }
     if (!so || !so->init_arr || so->init_arr_count == 0) return;
     size_t sl = so->path.rfind('/');
     const char* soname = (sl != std::string::npos)
