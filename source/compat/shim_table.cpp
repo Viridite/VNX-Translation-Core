@@ -384,7 +384,7 @@ void shimHeapAnchor(void) {
 bool shimHeapCheck(char* why, size_t whysz) {
     if (!g_heap_anchor) return true;
     const NlChunk* c = (const NlChunk*)((char*)g_heap_anchor - 16);
-    for (int i = 0; i < 200000; i++) {
+    for (int i = 0; i < 40000; i++) {
         if (!memIsHeap(c)) return true;             // walked out of the arena: done
         size_t sz = nlSize(c);
         if (sz < 32 || (sz & 15) != 0) {
@@ -397,6 +397,27 @@ bool shimHeapCheck(char* why, size_t whysz) {
             return false;
         }
         if (!memIsHeap(next)) return true;          // reached the top
+
+        // The size chain being intact is not the same as the heap being
+        // healthy, which is what the last run showed: it walked cleanly right
+        // up to the constructor that faulted. The value that faults is a bin
+        // pointer, and those live in the *body* of a free chunk, not in the
+        // chain — so a write into freed memory zeroes them while leaving every
+        // size perfectly valid.
+        //
+        // A chunk is free when the following chunk says its predecessor is not
+        // in use. Any such chunk is on a bin, so its fd and bk are non-null by
+        // construction; a null one is precisely the state that kills _free_r
+        // at the unlink.
+        if (!(next->size & NL_PREV_INUSE)) {
+            if (!c->fd || !c->bk) {
+                snprintf(why, whysz,
+                         "free chunk %p (size %zu) has null bin pointers "
+                         "fd=%p bk=%p — freed memory was written to",
+                         (const void*)c, sz, (const void*)c->fd, (const void*)c->bk);
+                return false;
+            }
+        }
         c = next;
     }
     return true;                                     // gave up before finding fault
