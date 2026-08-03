@@ -321,3 +321,10 @@ struct GuideLabel { GuideButton button; const char* text; };
 // leaves the diagram unannotated rather than failing the patch.
 void guideDrawLabels(SDL_Surface* img, GuideController controller,
                      const GuideLabel* labels, int labelCount);
+
+// Heap-integrity probes used to localise the corruption behind the free()
+// faults documented in docs/BRAIN_IT_ON_FINDINGS.md. Arm before a large
+// allocation, check after each phase; the first phase to report damage is the
+// one that overran.
+void elfHeapCanaryArm(void);
+void elfHeapCanaryCheck(const char* stage);

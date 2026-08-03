@@ -34,6 +34,51 @@ volatile uint64_t g_recover_lr  = 0;   // x30, the return address
 volatile uint64_t g_recover_x0  = 0;   // first operand, usually the null one
 volatile uint64_t g_recover_x8  = 0;
 
+// ─── Heap canaries ───────────────────────────────────────────────────────────
+// Brain It On dies with 155 faults inside newlib's free(), unlinking a chunk
+// through a NULL forward pointer — a corrupted free list (see
+// docs/BRAIN_IT_ON_FINDINGS.md). The corrupting write is NOT in the obvious
+// places: the segment copy, the relocation loop and the symtab/strtab copies
+// are each bounds-checked, and all three were verified before adding this.
+//
+// So rather than keep guessing at candidates, allocate small blocks around the
+// loader's big ones and verify their contents at each stage. Whichever
+// checkpoint first reports damage localises the write to one phase, which is
+// the thing the log currently cannot say.
+namespace {
+struct HeapCanary {
+    static const size_t kSize  = 64;
+    static const uint8_t kByte = 0xC9;
+    uint8_t* p = nullptr;
+    void arm() {
+        if (!p) p = (uint8_t*)malloc(kSize);
+        if (p) memset(p, kByte, kSize);
+    }
+    // Returns the offset of the first damaged byte, or -1 if intact.
+    int check() const {
+        if (!p) return -1;
+        for (size_t i = 0; i < kSize; i++) if (p[i] != kByte) return (int)i;
+        return -1;
+    }
+};
+HeapCanary g_canary_lo, g_canary_hi;
+}  // namespace
+
+// Arms canaries either side of the next big allocation.
+void elfHeapCanaryArm() { g_canary_lo.arm(); g_canary_hi.arm(); }
+
+// Reports (once per stage) whether anything has trampled them.
+void elfHeapCanaryCheck(const char* stage) {
+    int lo = g_canary_lo.check(), hi = g_canary_hi.check();
+    if (lo < 0 && hi < 0) return;
+    compatLogFmt("HEAP: canary damaged after %s (lo=%d hi=%d) — "
+                 "something wrote past a heap allocation during this phase",
+                 stage ? stage : "?", lo, hi);
+    compatLogFlush();
+    g_canary_lo.arm();      // re-arm so the NEXT damaged phase is also reported
+    g_canary_hi.arm();
+}
+
 static void logUnrecoveredFault(ThreadExceptionDump* ctx);
 
 extern "C" void __libnx_exception_handler(ThreadExceptionDump* ctx) {
@@ -240,6 +285,7 @@ void elfRunCtors(LoadedSo* so, ProgressCb cb) {
     signal(SIGSEGV, SIG_DFL);
     signal(SIGBUS,  SIG_DFL);
     signal(SIGILL,  SIG_DFL);
+    elfHeapCanaryCheck("constructors");
     compatLogFmt("ELF: %s: ctors done ok=%d failed=%d skipped=%d",
                  soname, ok, failed, skipped);
     {
@@ -803,6 +849,7 @@ LoadedSo* elfLoad(const char* path, ProgressCb cb) {
     }
 
     // ── Heap staging buffer ───────────────────────────────────────────────────
+    elfHeapCanaryArm();                 // bracket the biggest allocation we make
     uint8_t* stage = (uint8_t*)malloc(alloc_size);
     if (!stage) {
         compatLog("ELF: malloc staging buffer OOM");
@@ -847,6 +894,7 @@ LoadedSo* elfLoad(const char* path, ProgressCb cb) {
                      (unsigned long long)ph.p_memsz, ph.p_flags);
         memcpy(seg_dst, file_data + ph.p_offset, ph.p_filesz);
     }
+    elfHeapCanaryCheck("segment copy");
     compatLog("ELF: segs copied to stage");
     {
         uint32_t s0 = *(volatile uint32_t*)stage;
@@ -959,6 +1007,7 @@ LoadedSo* elfLoad(const char* path, ProgressCb cb) {
             so->symtab = so->symtab_heap;
         }
     }
+    elfHeapCanaryCheck("strtab/symtab copy");
     compatLog("ELF: strtab/symtab copied");
     compatLogFlush();
 
