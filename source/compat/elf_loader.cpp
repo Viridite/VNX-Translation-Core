@@ -1042,7 +1042,24 @@ LoadedSo* elfLoad(const char* path, ProgressCb cb) {
 
     // ── Heap staging buffer ───────────────────────────────────────────────────
     elfHeapCanaryArm();                 // bracket the biggest allocation we make
-    uint8_t* stage = (uint8_t*)malloc(alloc_size);
+    // One staging buffer for the whole process, grown as needed and never
+    // returned to the allocator.
+    //
+    // Each module used to malloc its own — 18.9MB for libunity, ~58MB for
+    // libil2cpp — zero it, and free it again. Three cycles of tens of
+    // megabytes is heavy churn right where the allocator is most fragile, and
+    // a freed block of that size coalesces into the top chunk, which is
+    // precisely the structure that ends up pointing at zeroed memory. Keeping
+    // one buffer removes the churn entirely; the peak footprint is unchanged
+    // because it is only ever as large as the biggest module.
+    static uint8_t* s_stage      = nullptr;
+    static size_t   s_stage_size = 0;
+    if (alloc_size > s_stage_size) {
+        uint8_t* grown = (uint8_t*)realloc(s_stage, alloc_size);
+        if (grown) { s_stage = grown; s_stage_size = alloc_size; }
+        else       { s_stage_size = 0; free(s_stage); s_stage = nullptr; }
+    }
+    uint8_t* stage = s_stage;
     if (!stage) {
         compatLog("ELF: malloc staging buffer OOM");
         if (using_split_map) {
@@ -1314,7 +1331,7 @@ LoadedSo* elfLoad(const char* path, ProgressCb cb) {
                                          data_va_base, data_jit_size, Perm_None);
                     svcCloseHandle(split_h_code);
                     svcCloseHandle(split_h_data);
-                    free(stage); free(file_data);
+                    free(file_data);
                     g_loaded_sos.pop_back(); delete so;
                     return nullptr;
                 }
@@ -1327,7 +1344,7 @@ LoadedSo* elfLoad(const char* path, ProgressCb cb) {
                                          code_write_va, code_jit_size, Perm_None);
                 svcCloseHandle(split_h_code);
                 svcCloseHandle(split_h_data);
-                free(stage); free(file_data);
+                free(file_data);
                 g_loaded_sos.pop_back(); delete so;
                 return nullptr;
             }
@@ -1336,7 +1353,7 @@ LoadedSo* elfLoad(const char* path, ProgressCb cb) {
                          (uint32_t)rc_hc, (uint32_t)rc_hd);
             compatLogFlush();
             if (R_SUCCEEDED(rc_hc)) svcCloseHandle(split_h_code);
-            free(stage); free(file_data);
+            free(file_data);
             g_loaded_sos.pop_back(); delete so;
             return nullptr;
         }
@@ -1348,8 +1365,7 @@ LoadedSo* elfLoad(const char* path, ProgressCb cb) {
             memcpy(data_write, stage + data_off_pg, data_jit_size);
         }
     }
-    free(stage);
-    compatLog("ELF: JIT copy done, stage freed");
+    compatLog("ELF: JIT copy done (staging buffer retained for the next module)");
     compatLogFlush();
 
     // ── Make code executable ─────────────────────────────────────────────────
