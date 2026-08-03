@@ -93,6 +93,7 @@ static char g_ui_stage[80] = "Working...";
 // Loader thread plumbing
 // ---------------------------------------------------------------------------
 struct LoaderCtx {
+    std::string app_name;      // display name, for the overlay
     std::string       apk_path;
     std::string       pkg_name;
     bool              skip_install = false;
@@ -156,6 +157,11 @@ static void progressCallback(const char* stage, const char* /*detail*/) {
         strncpy(g_ui_stage, stage, sizeof(g_ui_stage) - 1);
         g_ui_stage[sizeof(g_ui_stage) - 1] = '\0';
     }
+    // Mirror it to the overlay. Rate-limited inside, and a no-op when nothing
+    // changed, so this stays cheap enough to sit in the progress path.
+    if (g_loader_ctx)
+        installStatusWrite("installing", g_loader_ctx->pkg_name.c_str(),
+                           g_loader_ctx->app_name.c_str(), g_ui_stage, g_ui_pct);
 }
 
 static void loaderThreadFn(void*) {
@@ -1081,6 +1087,7 @@ struct App {
         LoaderCtx ctx;
         ctx.apk_path    = apk.path;
         ctx.pkg_name    = pkg;
+        ctx.app_name    = launchTitle;
         ctx.skip_install = skipInstall;
         g_loader_ctx    = &ctx;
 
@@ -1192,6 +1199,10 @@ struct App {
         }
         compatLog("loader: thread joined");
         compatLogFlush();
+        installStatusWrite(ctx.result.game_so ? "done" : "error",
+                           pkg.c_str(), launchTitle.c_str(),
+                           ctx.result.game_so ? "Ready" : "Failed",
+                           ctx.result.game_so ? 100 : 0);
         threadClose(&t);
         if (wdOk) {
             g_watchdog_stop.store(true, std::memory_order_release);

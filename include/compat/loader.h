@@ -238,6 +238,14 @@ void         compatLogFlush(void);
 // thread died while holding the normal logger's mutex.
 void         compatLogRaw(const char* msg);
 
+// Publish install progress for the HOME-menu overlay, which is a separate
+// process and can't see any of this directly. Cheap and rate-limited; safe to
+// call from a progress callback. state is "installing" | "done" | "error" |
+// "idle".
+void         installStatusWrite(const char* state, const char* pkg, const char* name,
+                                const char* stage, int pct);
+void         installStatusClear(void);
+
 // Called by jni_env.cpp when the game signals its own loading/splash screen
 // is done (splashScreenHasCompleted). Hides the Viridite branding
 // overlay drawn over the game's loading screen (see loader.cpp).
