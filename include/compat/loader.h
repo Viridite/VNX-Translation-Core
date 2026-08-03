@@ -263,6 +263,9 @@ void          shimAllocCounts(unsigned long* malloc_n, unsigned long* calloc_n,
 const char*   shimAddrRegion(uint64_t addr);
 void          shimHeapAnchor(void);
 bool          shimHeapCheck(char* why, size_t whysz);
+// Head-of-arena check only. Cheap enough to sample continuously, which is what
+// lets a corruption report name the constructor that caused it.
+bool          shimHeapCheckFast(char* why, size_t whysz);
 // How far the last walk got, and why it stopped. A clean result is only
 // meaningful alongside these.
 void          shimHeapWalkStats(int* steps, const char** stop);
@@ -277,6 +280,10 @@ void         loaderSetScreenOrient(int screen_orientation);
 // constructors is exercised; the constructors themselves are skipped, so this
 // tests the loader rather than the game.
 void         elfSetDryRun(bool on);
+// What the loader is executing right now — read by the integrity monitor so a
+// corruption report can name the constructor instead of a range of them.
+int          elfCurrentCtor(void);
+const char*  elfCurrentModule(void);
 int          elfGetUnresolvedCount(void);
 
 // Called by jni_env.cpp when the game signals its own loading/splash screen

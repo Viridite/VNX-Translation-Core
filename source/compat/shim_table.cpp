@@ -455,6 +455,33 @@ void shimHeapWalkStats(int* steps, const char** stop) {
     if (stop)  *stop  = g_walk_stop;
 }
 
+// Arena head only — no walking. Cheap enough to run fifty times a second,
+// which is what turns "one of these constructors" into "this one".
+bool shimHeapCheckFast(char* why, size_t whysz) {
+    const uintptr_t base = (uintptr_t)__malloc_sbrk_base;
+    if (!base) return true;
+    const uintptr_t end = arenaEnd();
+    const uintptr_t top = (uintptr_t)__malloc_av_[2];
+    if (!top) { snprintf(why, whysz, "av->top is null"); return false; }
+    if (top < base || top >= end) {
+        snprintf(why, whysz, "av->top=%p outside [%p,%p)",
+                 (void*)top, (void*)base, (void*)end);
+        return false;
+    }
+    const size_t tsz = nlSize((const NlChunk*)top);
+    if (tsz == 0) {
+        snprintf(why, whysz, "av->top=%p has size 0 (points at zeroed memory)",
+                 (void*)top);
+        return false;
+    }
+    if (top + tsz > end + 0x1000) {
+        snprintf(why, whysz, "av->top=%p size %zu runs past arena end %p",
+                 (void*)top, tsz, (void*)end);
+        return false;
+    }
+    return true;
+}
+
 bool shimHeapCheck(char* why, size_t whysz) {
     if (!g_heap_anchor) return true;
 

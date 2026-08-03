@@ -62,6 +62,13 @@ volatile uint64_t g_recover_freearg = 0;
 // int rather than an atomic: this runs on libnx's shared exception stack, and
 // the handler's recovery path must stay as close to nothing as possible.
 volatile int      g_ctor_faults = 0;
+// What the loader is doing right now, published for the integrity monitor.
+// Checking between constructors can only ever say "one of these 421 did it";
+// a monitor sampling continuously can say which, and this is what it reads.
+volatile int      g_cur_ctor = -1;
+volatile const char* g_cur_module = "";
+int  elfCurrentCtor(void)         { return g_cur_ctor; }
+const char* elfCurrentModule(void){ return (const char*)g_cur_module; }
 volatile uint64_t g_recover_fp  = 0;   // x29 — the frame chain the walk starts from
 volatile uint64_t g_recover_sp  = 0;
 
@@ -356,6 +363,8 @@ void elfRunCtors(LoadedSo* so, ProgressCb cb) {
 
         compatLogFmt("ELF: ctor[%zu/%zu] @%p", k+1, n, (void*)fn);
         compatLogFlush();
+        g_cur_ctor   = (int)(k + 1);
+        g_cur_module = soname;
         g_recover_owner = threadGetSelf(); g_in_recover = true; g_recover_sig = 0; g_recover_esr = 0; g_recover_far = 0;
         if (setjmp(g_recover_jmp) == 0) {
             fn();

@@ -146,11 +146,39 @@ static void probeAllocator(void) {
     compatLogRaw("WATCHDOG: allocator responded normally — malloc is NOT the wedge");
 }
 
+// Continuous integrity monitor.
+//
+// Checking the allocator between constructors could only ever say "one of
+// these 421 broke it". Sampling it every 20ms while the loader publishes which
+// constructor it is executing says which one — and it does so without anyone
+// having to decide in advance what to check, which is the whole problem with
+// adding a bespoke check each time and shipping a build to find out.
+//
+// The check itself is two loads and a compare, so 50 samples a second costs
+// nothing measurable next to the ELF loading going on beside it.
+static void arenaMonitorTick(void) {
+    static bool reported = false;
+    if (reported) return;
+    char why[400];
+    if (shimHeapCheckFast(why, sizeof(why))) return;
+    reported = true;
+    char buf[560];
+    snprintf(buf, sizeof(buf),
+             "MONITOR: allocator broke during %s ctor[%d] — %s",
+             elfCurrentModule(), elfCurrentCtor(), why);
+    compatLogRaw(buf);
+}
+
 static void watchdogThreadFn(void*) {
     uint64_t last = ~0ull;
     int      stuck = 0;
     while (!g_watchdog_stop.load(std::memory_order_acquire)) {
-        svcSleepThread(2000000000ULL);   // 2s
+        // 2s of stall detection, but sampled at 20ms so the allocator check
+        // lands close to whatever broke it.
+        for (int i = 0; i < 100 && !g_watchdog_stop.load(std::memory_order_acquire); i++) {
+            svcSleepThread(20000000ULL);   // 20ms
+            arenaMonitorTick();
+        }
         if (g_watchdog_stop.load(std::memory_order_acquire)) break;
         uint64_t f = g_main_frames.load(std::memory_order_relaxed);
         if (f == last) {
@@ -1277,6 +1305,27 @@ struct App {
                      0x800000 /*8MB stack — matches Android's main thread*/,
                      0x2C, 1 /*CPU 1*/);
         threadStart(&t);
+
+        // Ask the CPU to catch the writer directly.
+        //
+        // A watchpoint on av->top traps the instruction that stores to it, which
+        // is the one fact twenty releases of inference have failed to produce.
+        // It is a privileged syscall, so hbloader may well refuse — the result
+        // is logged either way, because "we did not get it" is worth knowing
+        // rather than assuming.
+        {
+            extern void* __malloc_av_[];
+            const u64 addr = (u64)(uintptr_t)&__malloc_av_[2];
+            if (envIsSyscallHinted(0x6C)) {
+                // DBGWCR: E=1, PAC=EL0(0b10), LSC=store(0b10), BAS=all 8 bytes.
+                const u64 ctrl = (0xFFull << 5) | (0b10ull << 3) | (0b10ull << 1) | 1ull;
+                Result rc = svcSetHardwareBreakPoint(0x10, ctrl, addr);
+                compatLogFmt("monitor: watchpoint on av->top (%p) rc=0x%x", (void*)addr, rc);
+            } else {
+                compatLogFmt("monitor: svcSetHardwareBreakPoint not permitted — "
+                             "sampling av->top every 20ms instead (%p)", (void*)addr);
+            }
+        }
 
         Thread wd;
         bool wdOk = R_SUCCEEDED(threadCreate(&wd, watchdogThreadFn, nullptr, nullptr,
