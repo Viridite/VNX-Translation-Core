@@ -431,11 +431,24 @@ bool shimHeapCheck(char* why, size_t whysz) {
         // so a mismatch is precisely what sends it into untouched memory with a
         // null forward pointer, which is the fault we keep seeing.
         if (i > 0 && !(c->size & NL_PREV_INUSE) && c->prev_size != prev_sz) {
+            // Dump the overrun block's contents. The chain advanced correctly
+            // to get here, so this is a real boundary and these bytes are what
+            // the writer left behind — a string, a struct, a repeated pattern:
+            // whatever it is will identify the owner far faster than tracing
+            // allocations backwards would.
+            char hex[3 * 48 + 1] = {}, asc[48 + 1] = {};
+            const unsigned char* d = (const unsigned char*)prev_c + 16;
+            size_t n = prev_sz > 16 ? prev_sz - 16 : 0;
+            if (n > 40) n = 40;
+            for (size_t j = 0; j < n; j++) {
+                snprintf(hex + j * 3, 4, "%02x ", d[j]);
+                asc[j] = (d[j] >= 32 && d[j] < 127) ? (char)d[j] : '.';
+            }
             snprintf(why, whysz,
-                     "chunk %p (step %d): PREV_INUSE clear but prev_size %zu != "
-                     "previous chunk's size %zu — prev was %p",
-                     (const void*)c, i, (size_t)c->prev_size, prev_sz,
-                     (const void*)prev_c);
+                     "chunk %p (step %d): PREV_INUSE clear but prev_size %llu != "
+                     "prev size %zu | prev %p data: %s| %s",
+                     (const void*)c, i, (unsigned long long)c->prev_size, prev_sz,
+                     (const void*)prev_c, hex, asc);
             return false;
         }
         prev_c  = c;

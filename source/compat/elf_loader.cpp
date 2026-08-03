@@ -343,7 +343,7 @@ void elfRunCtors(LoadedSo* so, ProgressCb cb) {
             // broken, and 300 identical complaints would bury the one line
             // that matters — which constructor broke it.
             if (heap_ok) {
-                char why[160];
+                char why[400];
                 if (!shimHeapCheck(why, sizeof(why))) {
                     heap_ok = false;
                     compatLogFmt("ELF: *** HEAP CORRUPTED BY ctor[%zu/%zu] @%p — %s",
