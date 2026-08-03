@@ -125,40 +125,50 @@ extern "C" void __libnx_exception_handler(ThreadExceptionDump* ctx) {
     exit(0);
 }
 
-// Walk the AArch64 frame chain and name each return address.
+// Name the caller by scanning the stack, not by walking frame pointers.
 //
-// A single link register was not enough: _free_r had already spilled its
-// caller's x30, so the value in the register was an address inside _free_r
-// itself. The frame records are what actually hold the chain — each is a
-// [saved x29, saved x30] pair at the frame pointer.
+// The frame-chain attempt returned an address in .data: newlib is built
+// without frame pointers, so x29 inside _free_r is not a frame pointer at all
+// and the chain is meaningless. A stack scan needs no such cooperation — any
+// return address pushed by a bl is still sitting there as a word that happens
+// to point into executable code, and that is a property we can test directly.
 //
-// Every load is checked with svcQueryMemory first. A fault inside this walk
-// would not be recoverable — the ctor's jmp_buf has already been consumed by
-// the time it runs — and would take the process down with it.
-static bool readableWord(uint64_t addr) {
-    if (!addr || (addr & 7)) return false;
+// Every read is bounds-checked against the stack's own mapping first. A fault
+// in here is unrecoverable, since the ctor's jmp_buf has already been consumed
+// by the time it runs, and would take the process down with it.
+static bool addrIsCode(uint64_t a, char* out, size_t outsz) {
+    if (!a || (a & 3)) return false;                  // instructions are 4-aligned
     MemoryInfo mi = {}; u32 pi = 0;
-    if (R_FAILED(svcQueryMemory(&mi, &pi, addr))) return false;
-    if (mi.perm == Perm_None) return false;
-    return (addr + 16) <= (mi.addr + mi.size);
+    if (R_FAILED(svcQueryMemory(&mi, &pi, a))) return false;
+    if (!(mi.perm & Perm_X)) return false;
+    elfDescribePc(a, out, outsz);
+    return true;
 }
 
 static void logFaultBacktrace(void) {
-    char line[256];
-    uint64_t fp = g_recover_fp;
-    compatLog("ELF:   backtrace (frame chain):");
-    for (int depth = 0; depth < 10; depth++) {
-        if (!readableWord(fp)) break;
-        uint64_t next = ((const uint64_t*)fp)[0];
-        uint64_t lr   = ((const uint64_t*)fp)[1];
-        if (!lr) break;
-        char where[192];
-        elfDescribePc(lr, where, sizeof(where));
-        snprintf(line, sizeof(line), "ELF:     #%d %p  %s", depth, (void*)lr, where);
-        compatLog(line);
-        if (next <= fp) break;          // chain must climb, or it is garbage
-        fp = next;
+    uint64_t sp = g_recover_sp;
+    if (!sp || (sp & 7)) { compatLog("ELF:   backtrace: no usable stack pointer"); return; }
+
+    MemoryInfo mi = {}; u32 pi = 0;
+    if (R_FAILED(svcQueryMemory(&mi, &pi, sp))) {
+        compatLog("ELF:   backtrace: stack not mapped");
+        return;
     }
+    const uint64_t stack_end = mi.addr + mi.size;
+
+    compatLog("ELF:   backtrace (code addresses on the stack, innermost first):");
+    char line[256], where[192];
+    int found = 0;
+    // 128 words is deep enough to clear _free_r's frame and reach whoever
+    // called it, without wading into unrelated history further up.
+    for (uint64_t a = sp; a + 8 <= stack_end && a < sp + 128 * 8; a += 8) {
+        uint64_t w = *(const uint64_t*)a;
+        if (!addrIsCode(w, where, sizeof(where))) continue;
+        snprintf(line, sizeof(line), "ELF:     %p  %s", (void*)w, where);
+        compatLog(line);
+        if (++found >= 8) break;
+    }
+    if (!found) compatLog("ELF:     (nothing on the stack resolved to code)");
 }
 
 static void ctor_crash_handler(int sig) {
@@ -372,13 +382,21 @@ void elfDescribePc(uint64_t pc, char* buf, size_t sz) {
             return;
         }
     }
-    // Host code: anchor the address against a known host symbol so it can be
-    // resolved offline against the build's .elf:
-    //   nm Viridite-Translation-Core-x64.elf | grep ' compatLog$'  → elf_addr
-    //   fault_elf_addr = elf_addr + delta
+    // Host code: report the offset within our own module. An NRO's runtime base
+    // is its text base, so this is directly comparable to `nm` output on the
+    // build's .elf — no subtraction by hand, and it makes clear at a glance
+    // whether an address is even in the text range.
     extern void compatLog(const char*);
-    long long d = (long long)pc - (long long)(uintptr_t)&compatLog;
-    snprintf(buf, sz, "%p (host, compatLog%+lld)", (void*)pc, d);
+    static uint64_t host_base = 0;
+    if (!host_base) {
+        MemoryInfo mi = {}; u32 pi = 0;
+        if (R_SUCCEEDED(svcQueryMemory(&mi, &pi, (uint64_t)(uintptr_t)&compatLog)))
+            host_base = mi.addr;
+    }
+    if (host_base && pc >= host_base)
+        snprintf(buf, sz, "host+0x%llx", (unsigned long long)(pc - host_base));
+    else
+        snprintf(buf, sz, "%p (unknown)", (void*)pc);
 }
 
 // Log what a faulting address actually is: containing kernel memory region,
