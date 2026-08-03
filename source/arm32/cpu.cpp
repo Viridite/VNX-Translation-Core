@@ -15,6 +15,9 @@ namespace a32 {
 // count and wall-clock time, and let the UI thread abort it.
 static volatile bool g_abort = false;
 void requestAbort() { g_abort = true; }
+// Read by the frame loop, which has to yield to the UI thread's stop
+// request the same way the constructor pass does.
+bool requestedAbort() { return g_abort; }
 
 // CPSR bit helpers.
 enum { C_N=1u<<31, C_Z=1u<<30, C_C=1u<<29, C_V=1u<<28, C_T=1u<<5 };

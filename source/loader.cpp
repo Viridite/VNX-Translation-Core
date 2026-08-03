@@ -803,6 +803,17 @@ bool apkInstall(const std::string& apk_path, const std::string& pkg_name, Progre
     return true;
 }
 
+// Present a frame drawn by the ARM32 interpreter.
+//
+// The interpreter has no business knowing about EGL — it runs guest code and
+// the guest never calls eglSwapBuffers itself (cocos2d-x expects the Java side
+// to do it). Keeping the swap here means both the 64-bit and 32-bit paths
+// present through exactly the same context and surface.
+namespace a32 { void a32FrameSwap(void); }
+void a32::a32FrameSwap(void) {
+    if (g_egl_display && g_egl_surface) eglSwapBuffers(g_egl_display, g_egl_surface);
+}
+
 // ─── launchApk ───────────────────────────────────────────────────────────────
 LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
                        ProgressCb cb, bool already_installed) {
@@ -940,6 +951,24 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
                 return result;
             }
             compatAudioSetAssetsDir(asset_dir.c_str());
+
+            // The guest is about to issue GL, so the context has to exist
+            // first. The 64-bit path sets this up further down, past the point
+            // this branch returns from.
+            ANativeWindow* nwin32 = &g_compat.window;
+            nwin32->width  = 1280;
+            nwin32->height = 720;
+            nwin32->format = 1;
+            nwin32->nwin   = nwindowGetDefault();
+            if (!setupEGL(nwin32)) {
+                compatLog("arm32: EGL setup failed — the game cannot present");
+                result.errorStage  = "ARM32 emulation";
+                result.errorDetail = "Could not create a GL context for the 32-bit game.";
+                if (g_compat_log) { logFlushDedup(); fclose(g_compat_log); g_compat_log = nullptr; }
+                return result;
+            }
+            compatLog("arm32: EGL ready");
+
             int rc = a32::run(main32.c_str(), pkg_name.c_str());
             compatLogFmt("arm32: run returned %d", rc);
             result.ok = (rc == 0);

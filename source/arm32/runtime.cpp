@@ -106,7 +106,65 @@ int run(const char* main_so_host_path, const char* pkg) {
         compatLog("arm32: no JNI_OnLoad export");
     }
 
-    compatLog("arm32: bring-up milestone reached (interpreter foundation)");
+    // ── Run the game ────────────────────────────────────────────────────────
+    // Everything above was bring-up: load, relocate, construct, JNI_OnLoad. It
+    // then reported success and returned, which is why launching a 32-bit game
+    // said it had worked and showed nothing — the loader had done its part and
+    // nobody had asked the game to draw.
+    //
+    // cocos2d-x is driven from Java: nativeInit once with the surface size,
+    // then nativeRender every frame. Those are ordinary exports, so the
+    // interpreter can call them directly and the GL the guest issues goes
+    // through the bridge onto the same context the launcher is already using.
+    uint32_t nativeInit = elf32Sym("Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeInit");
+    if (!nativeInit) nativeInit = elf32Sym("Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeInit__II");
+    uint32_t nativeRender = elf32Sym("Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeRender");
+
+    if (!nativeInit || !nativeRender) {
+        compatLogFmt("arm32: no cocos2d-x renderer exports (init=0x%x render=0x%x) — "
+                     "loaded but nothing to drive", nativeInit, nativeRender);
+        return -5;
+    }
+
+    compatLogFmt("arm32: nativeInit @0x%x 1280x720", nativeInit);
+    callGuest(cpu, nativeInit, 0, 0, 1280, 720);
+    if (cpu.halt) {
+        compatLogFmt("arm32: nativeInit halted at 0x%x", cpu.halt_pc);
+        cpuDumpBranches();
+        cpu.halt = false;
+        cpu.r[13] = A32_STACK_TOP;
+    } else {
+        compatLog("arm32: nativeInit OK");
+    }
+
+    compatLogFmt("arm32: nativeRender @0x%x — entering frame loop", nativeRender);
+    uint32_t frames = 0, halted_frames = 0;
+    while (!requestedAbort()) {
+        callGuest(cpu, nativeRender, 0, 0);
+        if (cpu.halt) {
+            // A frame that halts is reported once and then counted. The
+            // interpreter is missing something the game reaches every frame, so
+            // logging each one would bury everything else in the file.
+            if (halted_frames == 0) {
+                compatLogFmt("arm32: nativeRender halted at 0x%x on frame %u",
+                             cpu.halt_pc, frames);
+                cpuDumpBranches();
+            }
+            halted_frames++;
+            cpu.halt = false;
+            cpu.r[13] = A32_STACK_TOP;
+            if (halted_frames > 240) {
+                compatLog("arm32: every frame is halting — stopping");
+                break;
+            }
+        }
+        a32FrameSwap();
+        frames++;
+        if ((frames % 300) == 0)
+            compatLogFmt("arm32: %u frames (%u halted)", frames, halted_frames);
+    }
+    compatLogFmt("arm32: frame loop ended — %u frames, %u halted", frames, halted_frames);
+    cpuDumpUnimplSummary();
     return 0;
 }
 

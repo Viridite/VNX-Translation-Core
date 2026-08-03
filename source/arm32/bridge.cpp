@@ -4,6 +4,8 @@
 // imports are logged (this is how the set grows, log-driven).
 #include "arm32/arm32_internal.h"
 #include "compat/loader.h"
+#include <GLES2/gl2.h>
+#include <utility>
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
@@ -106,6 +108,17 @@ static inline uint32_t arg(CpuState& c, int i) {
     if (i < 4) return c.r[i];
     return *(uint32_t*)toHost(c.r[13] + (uint32_t)(i - 4) * 4);   // stacked args
 }
+// A float argument, per the ABI the NDK builds armeabi-v7a with.
+//
+// That is softfp: floats travel in the core registers as raw bits, not in the
+// VFP bank. So the value is already in r0-r3 (or on the stack) and only needs
+// reinterpreting — reading s0-s15 instead would pick up whatever the guest last
+// left there, which is the kind of wrong that produces plausible-looking
+// geometry rather than an obvious failure.
+static inline float fArg(CpuState& c, int i) {
+    uint32_t raw = arg(c, i);
+    float f; memcpy(&f, &raw, sizeof f); return f;
+}
 static inline char*  hstr(uint32_t g) { return g ? (char*)toHost(g) : nullptr; }
 static inline void*  hptr(uint32_t g) { return g ? (void*)toHost(g) : nullptr; }
 
@@ -129,7 +142,193 @@ static void gStrcpy(uint32_t d, uint32_t s, uint32_t n) {
 }
 
 // Returns true if it handled `name`; sets ret (r0) via out.
+
+// ─── OpenGL ES 2.0 ──────────────────────────────────────────────────────────
+// The interpreter had no GL at all, which is why bring-up stopped after
+// JNI_OnLoad: the constructors ran and there was nothing for the game to draw
+// through. cocos2d-x calls GL directly from guest code, so every entry point it
+// imports has to be forwarded.
+//
+// Most of these take scalars and forward unchanged. The ones that matter are
+// the pointer arguments, which are guest addresses and have to be translated —
+// a guest pointer handed straight to the driver is an address in the wrong
+// process's terms and would either fault or, worse, read whatever happens to
+// live at that host address.
+//
+// GLA(n) reads argument n as a scalar; GLP(n) translates it as a pointer,
+// mapping guest 0 to a real null rather than to the base of the guest region.
+#define GLA(n) arg(c, n)
+#define GLP(n) hptr(arg(c, n))
+
+static bool dispatchGL(CpuState& c, const char* name, uint32_t& ret) {
+    ret = 0;
+    // ── state ────────────────────────────────────────────────────────────────
+    if (!strcmp(name,"glClear"))          { glClear(GLA(0)); return true; }
+    if (!strcmp(name,"glClearColor"))     { glClearColor(fArg(c,0),fArg(c,1),fArg(c,2),fArg(c,3)); return true; }
+    if (!strcmp(name,"glClearDepthf"))    { glClearDepthf(fArg(c,0)); return true; }
+    if (!strcmp(name,"glClearStencil"))   { glClearStencil((GLint)GLA(0)); return true; }
+    if (!strcmp(name,"glViewport"))       { glViewport(GLA(0),GLA(1),GLA(2),GLA(3)); return true; }
+    if (!strcmp(name,"glScissor"))        { glScissor(GLA(0),GLA(1),GLA(2),GLA(3)); return true; }
+    if (!strcmp(name,"glEnable"))         { glEnable(GLA(0)); return true; }
+    if (!strcmp(name,"glDisable"))        { glDisable(GLA(0)); return true; }
+    if (!strcmp(name,"glIsEnabled"))      { ret = glIsEnabled(GLA(0)); return true; }
+    if (!strcmp(name,"glBlendFunc"))      { glBlendFunc(GLA(0),GLA(1)); return true; }
+    if (!strcmp(name,"glBlendFuncSeparate")) { glBlendFuncSeparate(GLA(0),GLA(1),GLA(2),GLA(3)); return true; }
+    if (!strcmp(name,"glBlendEquation"))  { glBlendEquation(GLA(0)); return true; }
+    if (!strcmp(name,"glBlendEquationSeparate")) { glBlendEquationSeparate(GLA(0),GLA(1)); return true; }
+    if (!strcmp(name,"glDepthFunc"))      { glDepthFunc(GLA(0)); return true; }
+    if (!strcmp(name,"glDepthMask"))      { glDepthMask((GLboolean)GLA(0)); return true; }
+    if (!strcmp(name,"glColorMask"))      { glColorMask(GLA(0),GLA(1),GLA(2),GLA(3)); return true; }
+    if (!strcmp(name,"glCullFace"))       { glCullFace(GLA(0)); return true; }
+    if (!strcmp(name,"glFrontFace"))      { glFrontFace(GLA(0)); return true; }
+    if (!strcmp(name,"glLineWidth"))      { glLineWidth(fArg(c,0)); return true; }
+    if (!strcmp(name,"glPolygonOffset"))  { glPolygonOffset(fArg(c,0),fArg(c,1)); return true; }
+    if (!strcmp(name,"glPixelStorei"))    { glPixelStorei(GLA(0),(GLint)GLA(1)); return true; }
+    if (!strcmp(name,"glStencilFunc"))    { glStencilFunc(GLA(0),GLA(1),GLA(2)); return true; }
+    if (!strcmp(name,"glStencilFuncSeparate")) { glStencilFuncSeparate(GLA(0),GLA(1),GLA(2),GLA(3)); return true; }
+    if (!strcmp(name,"glStencilMask"))    { glStencilMask(GLA(0)); return true; }
+    if (!strcmp(name,"glStencilOp"))      { glStencilOp(GLA(0),GLA(1),GLA(2)); return true; }
+    if (!strcmp(name,"glStencilOpSeparate")) { glStencilOpSeparate(GLA(0),GLA(1),GLA(2),GLA(3)); return true; }
+    if (!strcmp(name,"glGetError"))       { ret = glGetError(); return true; }
+    if (!strcmp(name,"glFinish"))         { glFinish(); return true; }
+    if (!strcmp(name,"glFlush"))          { glFlush(); return true; }
+
+    // ── textures ─────────────────────────────────────────────────────────────
+    if (!strcmp(name,"glGenTextures"))    { glGenTextures(GLA(0),(GLuint*)GLP(1)); return true; }
+    if (!strcmp(name,"glDeleteTextures")) { glDeleteTextures(GLA(0),(GLuint*)GLP(1)); return true; }
+    if (!strcmp(name,"glBindTexture"))    { glBindTexture(GLA(0),GLA(1)); return true; }
+    if (!strcmp(name,"glActiveTexture"))  { glActiveTexture(GLA(0)); return true; }
+    if (!strcmp(name,"glTexParameteri"))  { glTexParameteri(GLA(0),GLA(1),(GLint)GLA(2)); return true; }
+    if (!strcmp(name,"glTexImage2D"))     { glTexImage2D(GLA(0),GLA(1),GLA(2),GLA(3),GLA(4),GLA(5),GLA(6),GLA(7),GLP(8)); return true; }
+    if (!strcmp(name,"glTexSubImage2D"))  { glTexSubImage2D(GLA(0),GLA(1),GLA(2),GLA(3),GLA(4),GLA(5),GLA(6),GLA(7),GLP(8)); return true; }
+    if (!strcmp(name,"glCompressedTexImage2D")) { glCompressedTexImage2D(GLA(0),GLA(1),GLA(2),GLA(3),GLA(4),GLA(5),GLA(6),GLP(7)); return true; }
+    if (!strcmp(name,"glCopyTexSubImage2D")) { glCopyTexSubImage2D(GLA(0),GLA(1),GLA(2),GLA(3),GLA(4),GLA(5),GLA(6),GLA(7)); return true; }
+    if (!strcmp(name,"glGenerateMipmap")) { glGenerateMipmap(GLA(0)); return true; }
+    if (!strcmp(name,"glReadPixels"))     { glReadPixels(GLA(0),GLA(1),GLA(2),GLA(3),GLA(4),GLA(5),GLP(6)); return true; }
+
+    // ── shaders and programs ─────────────────────────────────────────────────
+    if (!strcmp(name,"glCreateShader"))   { ret = glCreateShader(GLA(0)); return true; }
+    if (!strcmp(name,"glDeleteShader"))   { glDeleteShader(GLA(0)); return true; }
+    if (!strcmp(name,"glCompileShader"))  { glCompileShader(GLA(0)); return true; }
+    if (!strcmp(name,"glCreateProgram"))  { ret = glCreateProgram(); return true; }
+    if (!strcmp(name,"glDeleteProgram"))  { glDeleteProgram(GLA(0)); return true; }
+    if (!strcmp(name,"glAttachShader"))   { glAttachShader(GLA(0),GLA(1)); return true; }
+    if (!strcmp(name,"glLinkProgram"))    { glLinkProgram(GLA(0)); return true; }
+    if (!strcmp(name,"glUseProgram"))     { glUseProgram(GLA(0)); return true; }
+    if (!strcmp(name,"glGetShaderiv"))    { glGetShaderiv(GLA(0),GLA(1),(GLint*)GLP(2)); return true; }
+    if (!strcmp(name,"glGetProgramiv"))   { glGetProgramiv(GLA(0),GLA(1),(GLint*)GLP(2)); return true; }
+    if (!strcmp(name,"glGetShaderInfoLog")) { glGetShaderInfoLog(GLA(0),GLA(1),(GLsizei*)GLP(2),(GLchar*)GLP(3)); return true; }
+    if (!strcmp(name,"glGetProgramInfoLog")){ glGetProgramInfoLog(GLA(0),GLA(1),(GLsizei*)GLP(2),(GLchar*)GLP(3)); return true; }
+    if (!strcmp(name,"glBindAttribLocation")) { glBindAttribLocation(GLA(0),GLA(1),(const GLchar*)GLP(2)); return true; }
+    if (!strcmp(name,"glGetAttribLocation"))  { ret = (uint32_t)glGetAttribLocation(GLA(0),(const GLchar*)GLP(1)); return true; }
+    if (!strcmp(name,"glGetUniformLocation")) { ret = (uint32_t)glGetUniformLocation(GLA(0),(const GLchar*)GLP(1)); return true; }
+
+    // glShaderSource takes an array of guest string pointers, so the array
+    // itself has to be rebuilt with host addresses before the driver sees it.
+    if (!strcmp(name,"glShaderSource")) {
+        GLuint sh = GLA(0); GLsizei n = (GLsizei)GLA(1);
+        uint32_t* gstrs = (uint32_t*)GLP(2);
+        uint32_t* glens = (uint32_t*)GLP(3);
+        if (!gstrs || n <= 0) return true;
+        std::vector<const GLchar*> hs((size_t)n);
+        std::vector<GLint>         hl((size_t)n);
+        for (GLsizei i = 0; i < n; i++) {
+            hs[i] = (const GLchar*)hptr(gstrs[i]);
+            hl[i] = glens ? (GLint)glens[i] : -1;
+        }
+        glShaderSource(sh, n, hs.data(), glens ? hl.data() : nullptr);
+        return true;
+    }
+
+    // ── uniforms ─────────────────────────────────────────────────────────────
+    if (!strcmp(name,"glUniform1i"))  { glUniform1i((GLint)GLA(0),(GLint)GLA(1)); return true; }
+    if (!strcmp(name,"glUniform1f"))  { glUniform1f((GLint)GLA(0),fArg(c,1)); return true; }
+    if (!strcmp(name,"glUniform2f"))  { glUniform2f((GLint)GLA(0),fArg(c,1),fArg(c,2)); return true; }
+    if (!strcmp(name,"glUniform3f"))  { glUniform3f((GLint)GLA(0),fArg(c,1),fArg(c,2),fArg(c,3)); return true; }
+    if (!strcmp(name,"glUniform4f"))  { glUniform4f((GLint)GLA(0),fArg(c,1),fArg(c,2),fArg(c,3),fArg(c,4)); return true; }
+    if (!strcmp(name,"glUniform1iv")) { glUniform1iv((GLint)GLA(0),GLA(1),(const GLint*)GLP(2)); return true; }
+    if (!strcmp(name,"glUniform1fv")) { glUniform1fv((GLint)GLA(0),GLA(1),(const GLfloat*)GLP(2)); return true; }
+    if (!strcmp(name,"glUniform2fv")) { glUniform2fv((GLint)GLA(0),GLA(1),(const GLfloat*)GLP(2)); return true; }
+    if (!strcmp(name,"glUniform3fv")) { glUniform3fv((GLint)GLA(0),GLA(1),(const GLfloat*)GLP(2)); return true; }
+    if (!strcmp(name,"glUniform4fv")) { glUniform4fv((GLint)GLA(0),GLA(1),(const GLfloat*)GLP(2)); return true; }
+    if (!strcmp(name,"glUniformMatrix3fv")) { glUniformMatrix3fv((GLint)GLA(0),GLA(1),(GLboolean)GLA(2),(const GLfloat*)GLP(3)); return true; }
+    if (!strcmp(name,"glUniformMatrix4fv")) { glUniformMatrix4fv((GLint)GLA(0),GLA(1),(GLboolean)GLA(2),(const GLfloat*)GLP(3)); return true; }
+
+    // ── vertex state and drawing ─────────────────────────────────────────────
+    if (!strcmp(name,"glEnableVertexAttribArray"))  { glEnableVertexAttribArray(GLA(0)); return true; }
+    if (!strcmp(name,"glDisableVertexAttribArray")) { glDisableVertexAttribArray(GLA(0)); return true; }
+    if (!strcmp(name,"glVertexAttribPointer")) {
+        // The last argument is either a client-memory pointer or a byte offset
+        // into the bound buffer, told apart by whether a buffer is bound. Only
+        // the first is a guest address; translating the second would turn an
+        // offset into a wild pointer.
+        GLint bound = 0;
+        glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &bound);
+        const void* p = bound ? (const void*)(uintptr_t)GLA(5) : (const void*)GLP(5);
+        glVertexAttribPointer(GLA(0),GLA(1),GLA(2),(GLboolean)GLA(3),GLA(4),p);
+        return true;
+    }
+    if (!strcmp(name,"glDrawArrays"))   { glDrawArrays(GLA(0),GLA(1),GLA(2)); return true; }
+    if (!strcmp(name,"glDrawElements")) {
+        GLint bound = 0;
+        glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &bound);
+        const void* p = bound ? (const void*)(uintptr_t)GLA(3) : (const void*)GLP(3);
+        glDrawElements(GLA(0),GLA(1),GLA(2),p);
+        return true;
+    }
+
+    // ── buffers and framebuffers ─────────────────────────────────────────────
+    if (!strcmp(name,"glGenBuffers"))     { glGenBuffers(GLA(0),(GLuint*)GLP(1)); return true; }
+    if (!strcmp(name,"glDeleteBuffers"))  { glDeleteBuffers(GLA(0),(GLuint*)GLP(1)); return true; }
+    if (!strcmp(name,"glBindBuffer"))     { glBindBuffer(GLA(0),GLA(1)); return true; }
+    if (!strcmp(name,"glBufferData"))     { glBufferData(GLA(0),GLA(1),GLP(2),GLA(3)); return true; }
+    if (!strcmp(name,"glBufferSubData"))  { glBufferSubData(GLA(0),GLA(1),GLA(2),GLP(3)); return true; }
+    if (!strcmp(name,"glIsBuffer"))       { ret = glIsBuffer(GLA(0)); return true; }
+    if (!strcmp(name,"glGenFramebuffers"))    { glGenFramebuffers(GLA(0),(GLuint*)GLP(1)); return true; }
+    if (!strcmp(name,"glDeleteFramebuffers")) { glDeleteFramebuffers(GLA(0),(GLuint*)GLP(1)); return true; }
+    if (!strcmp(name,"glBindFramebuffer"))    { glBindFramebuffer(GLA(0),GLA(1)); return true; }
+    if (!strcmp(name,"glFramebufferTexture2D")){ glFramebufferTexture2D(GLA(0),GLA(1),GLA(2),GLA(3),GLA(4)); return true; }
+    if (!strcmp(name,"glCheckFramebufferStatus")) { ret = glCheckFramebufferStatus(GLA(0)); return true; }
+    if (!strcmp(name,"glGenRenderbuffers"))    { glGenRenderbuffers(GLA(0),(GLuint*)GLP(1)); return true; }
+    if (!strcmp(name,"glDeleteRenderbuffers")) { glDeleteRenderbuffers(GLA(0),(GLuint*)GLP(1)); return true; }
+    if (!strcmp(name,"glBindRenderbuffer"))    { glBindRenderbuffer(GLA(0),GLA(1)); return true; }
+    if (!strcmp(name,"glRenderbufferStorage")) { glRenderbufferStorage(GLA(0),GLA(1),GLA(2),GLA(3)); return true; }
+    if (!strcmp(name,"glFramebufferRenderbuffer")) { glFramebufferRenderbuffer(GLA(0),GLA(1),GLA(2),GLA(3)); return true; }
+    if (!strcmp(name,"glIsRenderbuffer"))      { ret = glIsRenderbuffer(GLA(0)); return true; }
+
+    // ── queries ──────────────────────────────────────────────────────────────
+    if (!strcmp(name,"glGetIntegerv"))  { glGetIntegerv(GLA(0),(GLint*)GLP(1)); return true; }
+    if (!strcmp(name,"glGetFloatv"))    { glGetFloatv(GLA(0),(GLfloat*)GLP(1)); return true; }
+    if (!strcmp(name,"glGetBooleanv"))  { glGetBooleanv(GLA(0),(GLboolean*)GLP(1)); return true; }
+    if (!strcmp(name,"glGetShaderPrecisionFormat")) { glGetShaderPrecisionFormat(GLA(0),GLA(1),(GLint*)GLP(2),(GLint*)GLP(3)); return true; }
+    if (!strcmp(name,"glGetActiveAttrib"))  { glGetActiveAttrib(GLA(0),GLA(1),GLA(2),(GLsizei*)GLP(3),(GLint*)GLP(4),(GLenum*)GLP(5),(GLchar*)GLP(6)); return true; }
+    if (!strcmp(name,"glGetActiveUniform")) { glGetActiveUniform(GLA(0),GLA(1),GLA(2),(GLsizei*)GLP(3),(GLint*)GLP(4),(GLenum*)GLP(5),(GLchar*)GLP(6)); return true; }
+
+    // glGetString returns a host pointer the guest cannot dereference, so the
+    // string is copied into guest memory and cached — the game holds onto these
+    // (cocos2d-x parses GL_EXTENSIONS at startup), so a fresh copy per call
+    // would leak steadily.
+    if (!strcmp(name,"glGetString")) {
+        static std::vector<std::pair<uint32_t,uint32_t>> cache;   // name -> guest
+        uint32_t which = GLA(0);
+        for (auto& e : cache) if (e.first == which) { ret = e.second; return true; }
+        const char* v = (const char*)glGetString(which);
+        if (!v) { ret = 0; return true; }
+        uint32_t n = (uint32_t)strlen(v) + 1;
+        uint32_t g = guestAlloc(n);
+        if (g) { memcpy(toHost(g), v, n); cache.push_back({which, g}); }
+        ret = g;
+        return true;
+    }
+    return false;
+}
+#undef GLA
+#undef GLP
+
 static bool dispatch(CpuState& c, const char* name, uint32_t& ret) {
+    // GL first: it is the hottest path once the game is drawing.
+    if (name[0]=='g' && name[1]=='l' && dispatchGL(c, name, ret)) return true;
+
     // ── allocator: must stay inside the guest region and return guest addrs ──
     if (!strcmp(name, "malloc"))  { ret = guestAlloc(arg(c,0)); return true; }
     if (!strcmp(name, "free"))    { guestFree(arg(c,0)); ret = 0; return true; }
