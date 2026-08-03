@@ -266,6 +266,8 @@ bool          shimHeapCheck(char* why, size_t whysz);
 // How far the last walk got, and why it stopped. A clean result is only
 // meaningful alongside these.
 void          shimHeapWalkStats(int* steps, const char** stop);
+// Heap region bounds and the current break — tells exhaustion from corruption.
+void          shimHeapExtent(uint64_t* lo, uint64_t* hi, uint64_t* brk);
 
 // Tell the loader what the game's manifest asked for, before launchApk.
 // Raw android:screenOrientation constant; -1 for unspecified.

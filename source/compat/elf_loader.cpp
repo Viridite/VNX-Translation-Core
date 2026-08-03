@@ -399,6 +399,23 @@ void elfRunCtors(LoadedSo* so, ProgressCb cb) {
                          (void*)g_recover_x6, shimAddrRegion(g_recover_x6),
                          (void*)g_recover_x8);
             if (blk[0]) compatLog(blk);
+            // Once only: if the freed address is the end of the heap, this is
+            // exhaustion rather than damage, and every fix aimed at corruption
+            // has been aimed at the wrong thing.
+            static bool logged_extent = false;
+            if (!logged_extent) {
+                logged_extent = true;
+                uint64_t lo = 0, hi = 0, brk = 0;
+                shimHeapExtent(&lo, &hi, &brk);
+                compatLogFmt("ELF:  | heap region %p..%p (%llu MB), break %p, "
+                             "%lld MB left; freed ptr %s the end",
+                             (void*)lo, (void*)hi,
+                             (unsigned long long)((hi - lo) / 1048576),
+                             (void*)brk,
+                             (long long)((int64_t)(hi - brk) / 1048576),
+                             (mem == hi) ? "IS" : "is not");
+                compatLogFlush();
+            }
             // Only the first few: 155 identical faults would bury the log, and
             // they all come from the same place.
             if (g_ctor_faults <= 3) logFaultBacktrace();

@@ -414,6 +414,22 @@ void shimHeapAnchor(void) {
 static int         g_walk_steps  = 0;
 static const char* g_walk_stop   = "not run";
 
+// Heap extent and how much of it is left. The block _free_r faults on is a
+// zero-size chunk at a 256MB-aligned address, which is what the top of the
+// arena looks like when the break has run into the end of the region — so
+// whether that address IS the end is the difference between "the game
+// corrupted the heap" and "the game ran out of it".
+void shimHeapExtent(uint64_t* lo, uint64_t* hi, uint64_t* brk) {
+    if (!g_heap_lo) { MemoryInfo mi = {}; u32 pi = 0;
+                      if (R_SUCCEEDED(svcQueryMemory(&mi, &pi, (u64)(uintptr_t)&g_heap_lo)))
+                          { } }
+    // Force the cache to populate off a known heap pointer.
+    if (!g_heap_lo && g_heap_anchor) memIsHeap(g_heap_anchor);
+    if (lo)  *lo  = g_heap_lo;
+    if (hi)  *hi  = g_heap_hi;
+    if (brk) *brk = (uint64_t)(uintptr_t)_sbrk_r(_REENT, 0);
+}
+
 void shimHeapWalkStats(int* steps, const char** stop) {
     if (steps) *steps = g_walk_steps;
     if (stop)  *stop  = g_walk_stop;
