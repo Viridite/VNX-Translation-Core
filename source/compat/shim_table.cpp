@@ -387,8 +387,17 @@ bool shimHeapCheck(char* why, size_t whysz) {
     for (int i = 0; i < 40000; i++) {
         if (!memIsHeap(c)) return true;             // walked out of the arena: done
         size_t sz = nlSize(c);
+        // Size zero is the end of the arena, not damage. memIsHeap answers for
+        // the whole reserved heap region, but newlib has only sbrk'd part of
+        // it — walk past the top chunk and the rest is mapped, readable and
+        // entirely zero. Real damage shows up as a garbage non-zero size, so
+        // this stops the walk rather than reporting it. (The previous run
+        // reported exactly this at the same address and step in two different
+        // modules, which is what a fixed arena boundary looks like and what
+        // corruption does not.)
+        if (sz == 0) return true;
         if (sz < 32 || (sz & 15) != 0) {
-            snprintf(why, whysz, "chunk %p has size %zu (step %d)", (const void*)c, sz, i);
+            snprintf(why, whysz, "chunk %p has bad size %zu (step %d)", (const void*)c, sz, i);
             return false;
         }
         const NlChunk* next = (const NlChunk*)((const char*)c + sz);
