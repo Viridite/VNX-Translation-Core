@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <cstdarg>
 #include <algorithm>
 #include <atomic>
 #include <map>
@@ -1546,40 +1547,63 @@ int main(int argc, char** argv) {
     // restart, which is fast, and the alternative — duplicating the ELF loader
     // into the launcher so it could do this in-process — would mean the thing
     // being tested is not the thing that runs.
-    if (argc > 1 && argv[1] && strcmp(argv[1], "--selftest") == 0) {
-        logMsg("core-x64: dry-run self-test");
+    if (argc > 2 && argv[1] && strcmp(argv[1], "--selftest") == 0) {
+        // One game per invocation, named by the launcher.
+        //
+        // The first attempt dry-loaded every installed game in a single pass.
+        // Brain It On loaded in a second with no unresolved symbols and then
+        // the run stopped dead, because launchApk is not built to be called
+        // twice in one process: the first game's JIT mappings, virtmem
+        // reservations and Android TLS are all still held when the second load
+        // starts. Testing the game you have selected is also the thing you
+        // actually want, so this is both the correct design and the simpler
+        // one.
+        const std::string pkg = argv[2];
+        logMsg(("core-x64: dry-run self-test for " + pkg).c_str());
         elfSetDryRun(true);
-        FILE* out = fopen("sdmc:/Viridite/selftest_core.txt", "w");
-        if (out) fprintf(out, "v1\n");
 
-        for (const ApkInfo& a : app.apks) {
-            const std::string pkg = a.packageName.empty() ? a.filename : a.packageName;
-            if (!apkIsInstalled(pkg)) {
-                if (out) fprintf(out, "SKIP|%s|not installed\n", pkg.c_str());
-                continue;
-            }
+        FILE* out = fopen("sdmc:/Viridite/selftest_core.txt", "w");
+        // Every line is flushed as it is written. The previous run left a
+        // zero-byte file: stdio had buffered the results and the process never
+        // reached fclose, so the one thing that would have said how far it got
+        // was the thing that got lost.
+        auto emit = [&](const char* fmt, ...) {
+            if (!out) return;
+            va_list va; va_start(va, fmt);
+            vfprintf(out, fmt, va); va_end(va);
+            fflush(out);
+        };
+        emit("v1\n");
+
+        int idx = -1;
+        for (size_t i = 0; i < app.apks.size(); i++) {
+            const ApkInfo& a = app.apks[i];
+            if ((a.packageName.empty() ? a.filename : a.packageName) == pkg) { idx = (int)i; break; }
+        }
+        if (idx < 0) {
+            emit("FAIL|%s|not found in the APK list\n", pkg.c_str());
+        } else if (!apkIsInstalled(pkg)) {
+            emit("SKIP|%s|not installed — launch it once first\n", pkg.c_str());
+        } else {
+            const ApkInfo& a = app.apks[idx];
             app.launchTitle = a.appName.empty() ? pkg : a.appName;
-            app.noticeText  = "Dry-testing " + app.launchTitle + "...";
-            app.render();
+            emit("INFO|%s|starting dry load\n", pkg.c_str());
 
             elfResetCounts();
             uint64_t t0 = armGetSystemTick();
             LaunchResult r = launchApk(a.path, pkg, nullptr, /*skip_install=*/true);
             uint32_t ms = (uint32_t)(((armGetSystemTick() - t0) * 1000) /
                                      armGetSystemTickFreq());
-            if (out) {
-                if (r.game_so)
-                    fprintf(out, "PASS|%s|loaded in %ums, %d unresolved symbol(s)\n",
-                            pkg.c_str(), ms, elfGetUnresolvedCount());
-                else
-                    fprintf(out, "FAIL|%s|%s: %s\n", pkg.c_str(),
-                            r.errorStage.empty() ? "load failed" : r.errorStage.c_str(),
-                            r.errorDetail.c_str());
-            }
+            if (r.game_so)
+                emit("PASS|%s|loaded in %ums, %d unresolved symbol(s)\n",
+                     pkg.c_str(), ms, elfGetUnresolvedCount());
+            else
+                emit("FAIL|%s|%s: %s\n", pkg.c_str(),
+                     r.errorStage.empty() ? "load failed" : r.errorStage.c_str(),
+                     r.errorDetail.c_str());
         }
         if (out) fclose(out);
 
-        // Straight back to the launcher, which reads the file and shows it.
         envSetNextLoad("sdmc:/switch/Viridite.nro", "sdmc:/switch/Viridite.nro --selftest-results");
         logMsg("core-x64: dry run done, returning to launcher");
         app.cleanup();
