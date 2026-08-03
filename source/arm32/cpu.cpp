@@ -327,11 +327,22 @@ static void stepArm(CpuState& c) {
         uint32_t off = I ? ((((insn>>8)&0xF)<<4)|(insn&0xF)) : c.r[insn&0xF];
         uint32_t base = c.r[rn], addr = P ? (U?base+off:base-off) : base;
         if (L) {
-            if (sh==1) c.r[rd]=rd16(addr);
-            else if (sh==2) c.r[rd]=(int32_t)(int8_t)rd8(addr);
-            else c.r[rd]=(int32_t)(int16_t)rd16(addr);
+            if (sh==1) c.r[rd]=rd16(addr);              // LDRH
+            else if (sh==2) c.r[rd]=(int32_t)(int8_t)rd8(addr);   // LDRSB
+            else c.r[rd]=(int32_t)(int16_t)rd16(addr);  // LDRSH
         } else if (sh==1) {
-            wr16(addr, (uint16_t)c.r[rd]);              // STRH (LDRD/STRD sh=2/3 unhandled)
+            wr16(addr, (uint16_t)c.r[rd]);              // STRH
+        } else if (sh==2) {
+            // LDRD — note L is 0 for it, which is the trap in this encoding:
+            // the bit that means "load" everywhere else does not here. Both
+            // halves are read before either register is written, since
+            // LDRD rd,rd+1,[rd] is legal and writing rd first would move the
+            // address out from under the second load.
+            uint32_t a = rd32(addr), b = rd32(addr + 4);
+            c.r[rd] = a; if (rd + 1 < 16) c.r[rd + 1] = b;
+        } else {
+            wr32(addr, c.r[rd]);                        // STRD
+            if (rd + 1 < 16) wr32(addr + 4, c.r[rd + 1]);
         }
         if (!P) addr = U?base+off:base-off;
         if ((!P||W) && rn!=rd) c.r[rn]=addr;
@@ -559,6 +570,67 @@ static void stepThumb32(CpuState& c, uint32_t pc, uint16_t hw1) {
             if (size==0) wr8(addr,(uint8_t)c.r[rt]); else if (size==1) wr16(addr,(uint16_t)c.r[rt]); else wr32(addr,c.r[rt]);
         }
         if (wback) c.r[wback-1] = wbval;
+        return;
+    }
+
+    // ── Load/store dual, exclusive, table branch (11101 00xx1) ──
+    //
+    // The whole 1110100xxx1 group was missing, which is why Hill Climb
+    // Racing's tenth constructor stopped on e9d0 0100 — LDRD r0,r1,[r0]. These
+    // are not exotic: a C++ compiler emits LDRD/STRD for any 64-bit or paired
+    // load, TBB/TBH for switch statements, and LDREX/STREX for every atomic and
+    // mutex. Hitting one was a matter of time rather than bad luck.
+    //
+    // The group shares bits 15..9 with LDM/STM and is told apart by bit 6, so
+    // it has to be decoded before that handler rather than after.
+    if ((hw1 & 0xFE00) == 0xE800 && (hw1 & 0x0040)) {
+        const bool P = (hw1 >> 8) & 1, U = (hw1 >> 7) & 1;
+        const bool W = (hw1 >> 5) & 1, L = (hw1 >> 4) & 1;
+        const uint32_t rn = hw1 & 0xF;
+
+        if (!P && !W) {
+            // Exclusives and table branch share this corner of the encoding.
+            const uint32_t op = (hw2 >> 4) & 0xF;
+            if (L && ((hw2 & 0xFFE0) == 0xF000)) {
+                // TBB/TBH — a jump table, so the branch target comes out of
+                // memory rather than the instruction.
+                const bool H = (hw2 >> 4) & 1;
+                const uint32_t rm = hw2 & 0xF;
+                const uint32_t base = (rn == 15) ? (pc + 4) : c.r[rn];
+                const uint32_t idx  = c.r[rm];
+                const uint32_t half = H ? rd16(base + idx * 2) : rd8(base + idx);
+                c.r[15] = pc + 4 + half * 2;
+                return;
+            }
+            // LDREX/STREX. There is one core running guest code, so the
+            // exclusive monitor has nothing to contend with — a plain load, and
+            // a store that always reports success, is behaviourally correct
+            // here rather than merely convenient.
+            const uint32_t rt = (hw2 >> 12) & 0xF;
+            const uint32_t imm = (hw2 & 0xFF) << 2;
+            if (L) { c.r[rt] = rd32(c.r[rn] + imm); return; }
+            const uint32_t rd = (hw2 >> 8) & 0xF;
+            wr32(c.r[rn] + imm, c.r[rt]);
+            c.r[rd] = 0;                       // 0 = store succeeded
+            return;
+        }
+
+        // LDRD/STRD (immediate).
+        const uint32_t rt  = (hw2 >> 12) & 0xF;
+        const uint32_t rt2 = (hw2 >> 8)  & 0xF;
+        const uint32_t imm = (hw2 & 0xFF) << 2;
+        const uint32_t base = (rn == 15) ? ((pc + 4) & ~3u) : c.r[rn];
+        const uint32_t off  = U ? base + imm : base - imm;
+        const uint32_t addr = P ? off : base;
+        if (L) {
+            // Read both before writing either: LDRD rt,rt2,[rt] is legal, and
+            // updating rt first would change the address the second load uses.
+            const uint32_t a = rd32(addr), b = rd32(addr + 4);
+            c.r[rt] = a; c.r[rt2] = b;
+        } else {
+            wr32(addr, c.r[rt]); wr32(addr + 4, c.r[rt2]);
+        }
+        if (W && rn != 15) c.r[rn] = off;
         return;
     }
 
