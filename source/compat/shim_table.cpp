@@ -248,11 +248,76 @@ static void sh_exit_raw(int code) {
 // link into read-only memory. Android's allocator tolerates some of this and
 // ART hands out heap copies, so be equally forgiving: only pass real heap
 // pointers to the allocator, and log (symbolized, rate-limited) who tried.
+// The heap is one contiguous region that only ever grows, so its extent is
+// worth caching: the validation below needs half a dozen range checks per
+// free, and an svcQueryMemory apiece would put a syscall storm in the
+// allocator's hot path.
+static uintptr_t g_heap_lo = 0, g_heap_hi = 0;
+
 static bool memIsHeap(const void* p) {
+    uintptr_t a = (uintptr_t)p;
+    if (a >= g_heap_lo && a < g_heap_hi) return true;
     MemoryInfo mi = {};
     u32 pageinfo = 0;
     if (R_FAILED(svcQueryMemory(&mi, &pageinfo, (u64)p))) return false;
-    return mi.type == MemType_Heap;
+    if (mi.type != MemType_Heap) return false;
+    g_heap_lo = (uintptr_t)mi.addr;
+    g_heap_hi = (uintptr_t)mi.addr + mi.size;
+    return true;
+}
+
+// newlib's malloc_chunk on aarch64. The mem pointer callers hold is chunk+16,
+// so the size field sits at p-8, and fd/bk — the pointers the consolidation
+// code stores *through* — are at chunk+16 and chunk+24.
+struct NlChunk {
+    size_t  prev_size;
+    size_t  size;
+    NlChunk* fd;
+    NlChunk* bk;
+};
+static const size_t NL_PREV_INUSE = 1;
+static inline size_t nlSize(const NlChunk* c) { return c->size & ~(size_t)7; }
+
+static bool nlChunkSane(const NlChunk* c) {
+    if (!c || ((uintptr_t)c & 15) != 0) return false;
+    if (!memIsHeap(c) || !memIsHeap((const char*)c + 16)) return false;
+    size_t sz = nlSize(c);
+    if (sz < 32 || (sz & 15) != 0) return false;             // MINSIZE, 16-aligned
+    if (!memIsHeap((const char*)c + sz)) return false;
+    return true;
+}
+
+// True if handing p to _free_r would make it walk into something that is not a
+// chunk. This is the fault Brain It On hits 155 times: free() decides to
+// consolidate with a neighbour, reads that neighbour's fd, and stores through
+// it — but the neighbour was never a chunk, so fd is zero and the store lands
+// on address 0x18. Predicting the consolidation is the only way to catch it,
+// because the pointer being freed is itself perfectly valid.
+//
+// fd/bk are only tested for null, deliberately. The head of a bin lives in
+// newlib's static arena rather than the heap, so a legitimate fd can point
+// outside it — anything stricter would reject good frees and leak.
+static bool freeWouldCorrupt(void* p) {
+    NlChunk* c = (NlChunk*)((char*)p - 16);
+    if (!nlChunkSane(c)) return true;
+
+    // Forward: newlib merges with the next chunk when the chunk after *that*
+    // reports its predecessor as free.
+    NlChunk* next = (NlChunk*)((char*)c + nlSize(c));
+    if (!nlChunkSane(next)) return true;
+    NlChunk* after = (NlChunk*)((char*)next + nlSize(next));
+    if (memIsHeap(after) && !(after->size & NL_PREV_INUSE)) {
+        if (!next->fd || !next->bk) return true;
+    }
+
+    // Backward: the same one chunk earlier, reached through prev_size.
+    if (!(c->size & NL_PREV_INUSE)) {
+        if (c->prev_size < 32 || (c->prev_size & 15) != 0) return true;
+        NlChunk* prev = (NlChunk*)((char*)c - c->prev_size);
+        if (!nlChunkSane(prev)) return true;
+        if (!prev->fd || !prev->bk) return true;
+    }
+    return false;
 }
 // A pointer that is in the heap page range (memIsHeap) can still be something
 // newlib never handed out: an interior pointer into a larger chunk, a slice out
@@ -268,6 +333,10 @@ static bool looksLikeNewlibChunk(void* p) {
     if (((uintptr_t)p & 0xF) != 0) return false;          // newlib pointers are 16-aligned
     size_t us = malloc_usable_size(p);                     // reads header; in-heap so fault-safe
     if (us == 0 || us > (256u * 1024u * 1024u)) return false;
+    // usable_size only reads p-8, so a foreign pointer whose preceding bytes
+    // happen to look like a plausible size sails through. Walk the chunk graph
+    // and check the consolidation newlib would actually perform.
+    if (freeWouldCorrupt(p)) return false;
     return true;
 }
 static void sh_free(void* p) {
