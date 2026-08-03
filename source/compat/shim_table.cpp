@@ -384,6 +384,18 @@ extern "C" void* _sbrk_r(struct _reent*, ptrdiff_t);   // current break = arena 
 // was never a chunk. Watching this one pointer catches the moment it goes bad.
 extern "C" void*  __malloc_av_[];
 extern "C" char*  __malloc_sbrk_base;
+extern "C" size_t __malloc_max_sbrked_mem;
+
+// The end of what newlib has actually taken from the system.
+//
+// _sbrk_r(_REENT, 0) is not usable for this: the walk and the extent report
+// call it identically and disagree — the walk covered 68000 chunks and claimed
+// to reach the break while the report put the break 4KB above the base, and
+// 68000 chunks do not fit in 4KB. newlib's own accounting does not have that
+// problem, and it is the number the allocator itself works from.
+static uintptr_t arenaEnd(void) {
+    return (uintptr_t)__malloc_sbrk_base + (uintptr_t)__malloc_max_sbrked_mem;
+}
 
 static void*  g_heap_anchor = nullptr;
 
@@ -435,7 +447,7 @@ void shimHeapExtent(uint64_t* lo, uint64_t* hi, uint64_t* brk) {
     if (!g_heap_lo && g_heap_anchor) memIsHeap(g_heap_anchor);
     if (lo)  *lo  = g_heap_lo;
     if (hi)  *hi  = g_heap_hi;
-    if (brk) *brk = (uint64_t)(uintptr_t)_sbrk_r(_REENT, 0);
+    if (brk) *brk = (uint64_t)arenaEnd();
 }
 
 void shimHeapWalkStats(int* steps, const char** stop) {
@@ -451,7 +463,7 @@ bool shimHeapCheck(char* why, size_t whysz) {
     // examined a fraction of the heap and reported the rest clean without ever
     // looking at it. That is why the corruption below went unseen: it sits past
     // that point.
-    const uintptr_t arena_end = (uintptr_t)_sbrk_r(_REENT, 0);
+    const uintptr_t arena_end = arenaEnd();
     g_walk_steps = 0;
     g_walk_stop  = "completed";
 
@@ -474,7 +486,7 @@ bool shimHeapCheck(char* why, size_t whysz) {
     }
     // A break of 0 or -1 would make every bound below trivially true and turn
     // the whole walk into an immediate "clean" — say so rather than pretend.
-    if (arena_end < 0x1000) { g_walk_stop = "sbrk returned nothing"; return true; }
+    if (arena_end < 0x1000) { g_walk_stop = "no arena accounting"; return true; }
 
     // Start at the bottom of the arena, not at the anchor. The anchor is
     // allocated in main(), but our own static constructors run before main()
