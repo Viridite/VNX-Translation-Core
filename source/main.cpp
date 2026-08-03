@@ -9,6 +9,7 @@
 #include <cstring>
 #include <algorithm>
 #include <atomic>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -410,8 +411,41 @@ struct App {
         }
     }
 
+    // Rendered-glyph cache.
+    //
+    // drawTrackedCentered draws letter by letter so it can apply tracking, and
+    // this used to rasterise and upload a fresh GPU texture for every glyph on
+    // every frame, then destroy it — title, status line and footer together are
+    // around fifty textures per frame, thousands within a few seconds of
+    // loading. Each one is an nvmap allocation on Switch, and that much churn
+    // is both wasteful and a good way to run the graphics allocator out of
+    // something while the loader thread is competing for the same memory.
+    //
+    // The text is drawn from a small alphabet, so caching by glyph collapses
+    // that to a few dozen textures created once. Only short strings are cached,
+    // which keeps whole-line callers (the log panel's changing text) out of it,
+    // and the cache is capped so a pathological caller cannot grow it forever.
+    struct GlyphTex { SDL_Texture* tex; int w, h; };
+    std::map<std::string, GlyphTex> glyphCache;
+    static constexpr size_t GLYPH_CACHE_MAX = 512;
+
     int drawText(TTF_Font* f, const std::string& s, SDL_Color col, int x, int y) {
         if (s.empty() || !f) return 0;
+
+        const bool cacheable = s.size() <= 8 && glyphCache.size() < GLYPH_CACHE_MAX;
+        std::string key;
+        if (cacheable) {
+            char kb[64];
+            snprintf(kb, sizeof(kb), "%p|%02x%02x%02x%02x|", (void*)f, col.r, col.g, col.b, col.a);
+            key = kb; key += s;
+            auto it = glyphCache.find(key);
+            if (it != glyphCache.end()) {
+                SDL_Rect dst = {x, y, it->second.w, it->second.h};
+                SDL_RenderCopy(rdr, it->second.tex, nullptr, &dst);
+                return it->second.w;
+            }
+        }
+
         SDL_Surface* surf = TTF_RenderUTF8_Blended(f, s.c_str(), col);
         if (!surf) return 0;
         SDL_Texture* tex = SDL_CreateTextureFromSurface(rdr, surf);
@@ -422,7 +456,8 @@ struct App {
         SDL_QueryTexture(tex, nullptr, nullptr, &tw, &th);
         SDL_Rect dst = {x, y, tw, th};
         SDL_RenderCopy(rdr, tex, nullptr, &dst);
-        SDL_DestroyTexture(tex);
+        if (cacheable) glyphCache.emplace(key, GlyphTex{tex, tw, th});
+        else           SDL_DestroyTexture(tex);
         return w;
     }
 
