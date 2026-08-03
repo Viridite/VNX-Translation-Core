@@ -6,6 +6,8 @@
 #include <GLES2/gl2.h>
 #include <GLES3/gl3.h>
 #include <EGL/egl.h>
+#include <sys/statvfs.h>
+#include <cinttypes>
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
@@ -1356,6 +1358,213 @@ static void w_glClear(GLbitfield mask) {
     if (!had) glDisable(GL_SCISSOR_TEST);
 }
 
+
+// ─── ARM32 (AArch32) EABI helpers ───────────────────────────────────────────
+// armeabi-v7a compilers emit these instead of plain memcpy/memset for aggregate
+// copies and initialisers, so a 32-bit game reaches them constantly even though
+// its source never mentions them. They do not exist on arm64 at all, which is
+// why nothing needed them until now.
+//
+// The argument order is the trap: __aeabi_memset takes (dest, n, c) — length
+// before the fill byte — which is the reverse of memset. Wiring it straight
+// through would fill with the length and set the count from the colour value,
+// and the corruption would look nothing like a missing symbol.
+extern "C" {
+static void* ae_memcpy (void* d, const void* s, size_t n) { return memcpy(d, s, n); }
+static void* ae_memmove(void* d, const void* s, size_t n) { return memmove(d, s, n); }
+static void  ae_memset (void* d, size_t n, int c)         { memset(d, c, n); }
+static void  ae_memclr (void* d, size_t n)                { memset(d, 0, n); }
+}
+
+// ─── OpenSL ES ──────────────────────────────────────────────────────────────
+// cocos2d-x asks for OpenSL when it is present and falls back to its Java audio
+// path when the engine cannot be created. Returning failure from slCreateEngine
+// is therefore not a stub that breaks sound — it is the documented way to tell
+// the game to use the path we already implement, which is the one HCR's audio
+// runs through today. The SL_IID_* symbols are data, and cocos2d-x takes their
+// addresses before it ever checks whether the engine exists, so they have to
+// resolve to something readable.
+static const uint32_t kSlIidStorage[16] = {0};
+static int32_t sl_createEngine(void*, uint32_t, const void*, uint32_t,
+                               const void*, const void*) {
+    compatLog("OpenSL: slCreateEngine → not supported, game will use its Java audio path");
+    return 0x0000000C;   // SL_RESULT_FEATURE_UNSUPPORTED
+}
+
+// ─── Assorted libc the 32-bit build reaches for ─────────────────────────────
+static long   stub_lround (double x)      { return (long)(x < 0 ? x - 0.5 : x + 0.5); }
+static long   stub_lroundf(float  x)      { return (long)(x < 0 ? x - 0.5f : x + 0.5f); }
+static long long stub_llround(double x)   { return (long long)(x < 0 ? x - 0.5 : x + 0.5); }
+static float  stub_remainderf(float a, float b) { return remainderf(a, b); }
+static float  stub_erff (float x)         { return erff(x); }
+static float  stub_erfcf(float x)         { return erfcf(x); }
+
+static void*  stub_memmem(const void* h, size_t hl, const void* n, size_t nl) {
+    if (!nl || hl < nl) return nullptr;
+    const unsigned char* hp = (const unsigned char*)h;
+    for (size_t i = 0; i + nl <= hl; i++)
+        if (memcmp(hp + i, n, nl) == 0) return (void*)(hp + i);
+    return nullptr;
+}
+
+static char* stub_inet_ntoa(uint32_t addr) {
+    static char buf[16];
+    unsigned char* b = (unsigned char*)&addr;
+    snprintf(buf, sizeof(buf), "%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
+    return buf;
+}
+static const char* stub_gai_strerror(int) { return "name resolution unavailable"; }
+static void* stub_getprotobyname(const char*) { return nullptr; }
+static int   stub_mlock(const void*, size_t) { return 0; }   // nothing is paged out here
+static long  stub_pathconf(const char*, int) { return -1; }
+
+// The *at() family, resolved against the process CWD — Switch has no directory
+// file descriptors, and every caller here passes AT_FDCWD anyway.
+static int stub_openat(int, const char* path, int flags, ...) {
+    va_list va; va_start(va, flags); int mode = va_arg(va, int); va_end(va);
+    return open(path, flags, mode);
+}
+static int stub_unlinkat(int, const char* path, int) { return remove(path); }
+static int stub_utimensat(int, const char*, const void*, int) { return 0; }
+static int stub_fchmodat(int, const char*, mode_t, int) { return 0; }
+
+static void stub_assert2(const char* f, int l, const char* fn, const char* m) {
+    compatLogFmt("game assert: %s:%d %s: %s", f ? f : "?", l, fn ? fn : "?", m ? m : "?");
+    abort();
+}
+static void stub_android_log_assert(const char* cond, const char* tag, const char* fmt, ...) {
+    char b[512]; va_list va; va_start(va, fmt);
+    vsnprintf(b, sizeof(b), fmt ? fmt : "", va); va_end(va);
+    compatLogFmt("android_log_assert [%s] %s: %s", tag ? tag : "?", cond ? cond : "?", b);
+    abort();
+}
+static void stub_FD_CLR_chk(int, void*, size_t) {}
+
+// newlib has no fdopendir — its DIR is not built from a descriptor. Every
+// caller in this game reaches it through the *at() family it also cannot use,
+// so failing cleanly with EBADF is both honest and what those callers already
+// handle.
+static void* stub_fdopendir(int) { errno = EBADF; return nullptr; }
+
+// newlib has no sigsetjmp/siglongjmp — it has no signal masks to save. The
+// plain pair is behaviourally identical here, and the saved-mask argument is
+// simply ignored rather than pretending a mask was restored.
+static int  stub_sigsetjmp(jmp_buf env, int) { return setjmp(env); }
+static void stub_siglongjmp(jmp_buf env, int v) { longjmp(env, v); }
+
+// GL_OES_mapbuffer. Desktop-style glMapBuffer exists in our GLES headers under
+// the core name; the OES entry points are the same call under the extension's
+// spelling, which is what a 2012-era cocos2d-x build asks for.
+static void* stub_glMapBufferOES(unsigned target, unsigned access) {
+    return glMapBufferRange(target, 0, 0, access);
+}
+static unsigned char stub_glUnmapBufferOES(unsigned target) {
+    return (unsigned char)glUnmapBuffer(target);
+}
+
+// ARM exception-index lookup. Only reached when C++ unwinds through 32-bit
+// frames; returning null means "no unwind data here", which turns an unwind
+// into a terminate rather than a jump through a wild pointer.
+static const void* stub_dl_unwind_find_exidx(const void*, int* count) {
+    if (count) *count = 0;
+    return nullptr;
+}
+
+
+// ─── Remaining 32-bit imports ───────────────────────────────────────────────
+static int   stub_AAsset_openFileDescriptor(void*, off_t* start, off_t* len) {
+    // Assets live inside the APK, and we extract rather than mmap it, so there
+    // is no descriptor-and-range to hand back. Callers treat -1 as "read it the
+    // normal way", which is the path that already works.
+    if (start) *start = 0;
+    if (len)   *len   = 0;
+    return -1;
+}
+
+// Bionic's _FORTIFY_SOURCE variants. The extra argument is the compiler's idea
+// of the destination size; honouring it is the whole point, so these bound the
+// copy rather than forwarding and ignoring it.
+static char* stub_fgets_chk(char* d, int n, FILE* f, size_t dsz) {
+    if ((size_t)n > dsz) n = (int)dsz;
+    return fgets(d, n, f);
+}
+static char* stub_strncpy_chk(char* d, const char* s, size_t n, size_t dsz) {
+    if (n > dsz) n = dsz;
+    return strncpy(d, s, n);
+}
+static char* stub_strrchr_chk(const char* s, int c, size_t) { return (char*)strrchr(s, c); }
+
+static const char* g_progname = "viridite";
+static const char* stub_getprogname(void) { return g_progname; }
+
+static void     stub_arc4random_buf(void* b, size_t n) { if (b && n) randomGet(b, n); }
+static uint32_t stub_arc4random_uniform(uint32_t upper) {
+    if (upper < 2) return 0;
+    uint32_t r = 0; randomGet(&r, sizeof(r));
+    return r % upper;
+}
+
+static int stub_asprintf(char** out, const char* fmt, ...) {
+    if (!out) return -1;
+    va_list a, b; va_start(a, fmt); va_copy(b, a);
+    int n = vsnprintf(nullptr, 0, fmt, a); va_end(a);
+    if (n < 0) { va_end(b); return -1; }
+    *out = (char*)malloc((size_t)n + 1);
+    if (!*out) { va_end(b); return -1; }
+    vsnprintf(*out, (size_t)n + 1, fmt, b); va_end(b);
+    return n;
+}
+static void stub_vsyslog(int, const char* fmt, va_list a) {
+    char b[512]; vsnprintf(b, sizeof(b), fmt ? fmt : "", a); compatLog(b);
+}
+static char* stub_strndup(const char* s, size_t n) {
+    if (!s) return nullptr;
+    size_t l = 0; while (l < n && s[l]) l++;
+    char* r = (char*)malloc(l + 1);
+    if (r) { memcpy(r, s, l); r[l] = 0; }
+    return r;
+}
+static void stub_setbuf(FILE* f, char* b) { setvbuf(f, b, b ? _IOFBF : _IONBF, BUFSIZ); }
+static int  stub_pause(void) { errno = EINTR; return -1; }   // no signals to wait for
+
+// ARM32 cache maintenance. The interpreter fetches through the same memory it
+// writes, so there is no instruction cache to keep coherent — but a game that
+// self-modifies expects the call to exist and to succeed.
+static int stub_cacheflush(long, long, long) { return 0; }
+
+// epoll. Nothing here polls descriptors that would ever become ready, so these
+// fail rather than pretending to watch something.
+static int stub_epoll_create(int)            { errno = ENOSYS; return -1; }
+static int stub_epoll_ctl(int,int,int,void*) { errno = ENOSYS; return -1; }
+static int stub_epoll_wait(int,void*,int,int){ errno = ENOSYS; return -1; }
+static int stub_inotify_rm_watch(int,int)    { errno = ENOSYS; return -1; }
+static int stub_tgkill(int,int,int)          { errno = ENOSYS; return -1; }
+
+// Process creation. There is one process here and no way to make another, so
+// these fail rather than appearing to fork — the crash-reporter libraries that
+// call them handle the failure by not reporting, which is the outcome we want
+// anyway.
+static int   stub_execv (const char*, char* const[])             { errno = ENOSYS; return -1; }
+static int   stub_execvpe(const char*, char* const[], char* const[]) { errno = ENOSYS; return -1; }
+static pid_t stub_getppid(void)                                   { return 1; }
+static pid_t stub_wait4(pid_t, int* st, int, void*) { if (st) *st = 0; errno = ECHILD; return -1; }
+static long  stub_lrint(double x) { return (long)(x < 0 ? x - 0.5 : x + 0.5); }
+
+static time_t stub_timegm(struct tm* t) {
+    // mktime applies the local timezone; UTC here means undoing that, and the
+    // Switch runs UTC anyway, so the correction is normally zero.
+    if (!t) return (time_t)-1;
+    time_t local = mktime(t);
+    if (local == (time_t)-1) return local;
+    struct tm probe = {};
+    time_t zero = 0;
+    gmtime_r(&zero, &probe);
+    return local - mktime(&probe);
+}
+
+static intmax_t  stub_strtoimax (const char* s, char** e, int b) { return strtoll(s, e, b); }
+static uintmax_t stub_strtoumax (const char* s, char** e, int b) { return strtoull(s, e, b); }
+
 // ─── Android-specific ────────────────────────────────────────────────────────
 static void stub_android_abort_msg(const char* msg) {
     compatLogFmt("android_abort_message: %s", msg ? msg : "");
@@ -2598,6 +2807,68 @@ static const ShimEntry g_shims[] = {
     // ── scheduling / system ──────────────────────────────────────────────────
     {"sched_yield",     (void*)stub_sched_yield},
     {"sysconf",         (void*)stub_sysconf},
+
+    // ── ARM32 EABI helpers (armeabi-v7a only) ────────────────────────────────
+    {"__aeabi_memcpy",   (void*)ae_memcpy},  {"__aeabi_memcpy4",  (void*)ae_memcpy},
+    {"__aeabi_memcpy8",  (void*)ae_memcpy},  {"__aeabi_memmove",  (void*)ae_memmove},
+    {"__aeabi_memmove4", (void*)ae_memmove}, {"__aeabi_memmove8", (void*)ae_memmove},
+    {"__aeabi_memset",   (void*)ae_memset},  {"__aeabi_memset4",  (void*)ae_memset},
+    {"__aeabi_memset8",  (void*)ae_memset},  {"__aeabi_memclr",   (void*)ae_memclr},
+    {"__aeabi_memclr4",  (void*)ae_memclr},  {"__aeabi_memclr8",  (void*)ae_memclr},
+
+    // ── OpenSL ES: fail the engine so cocos2d-x uses its Java audio path ─────
+    {"slCreateEngine",                  (void*)sl_createEngine},
+    {"SL_IID_NULL",                     (void*)kSlIidStorage},
+    {"SL_IID_ENGINE",                   (void*)kSlIidStorage},
+    {"SL_IID_PLAY",                     (void*)kSlIidStorage},
+    {"SL_IID_SEEK",                     (void*)kSlIidStorage},
+    {"SL_IID_VOLUME",                   (void*)kSlIidStorage},
+    {"SL_IID_PREFETCHSTATUS",           (void*)kSlIidStorage},
+    {"SL_IID_METADATAEXTRACTION",       (void*)kSlIidStorage},
+    {"SL_IID_ANDROIDSIMPLEBUFFERQUEUE", (void*)kSlIidStorage},
+
+    // ── assorted libc the 32-bit build reaches for ───────────────────────────
+    {"lround",   (void*)stub_lround},   {"lroundf",  (void*)stub_lroundf},
+    {"llround",  (void*)stub_llround},  {"remainderf", (void*)stub_remainderf},
+    {"erff",     (void*)stub_erff},     {"erfcf",    (void*)stub_erfcf},
+    {"memmem",   (void*)stub_memmem},   {"inet_ntoa", (void*)stub_inet_ntoa},
+    {"gai_strerror", (void*)stub_gai_strerror},
+    {"getprotobyname", (void*)stub_getprotobyname},
+    {"mlock",    (void*)stub_mlock},    {"pathconf", (void*)stub_pathconf},
+    {"openat",   (void*)stub_openat},   {"unlinkat", (void*)stub_unlinkat},
+    {"utimensat",(void*)stub_utimensat},{"fchmodat", (void*)stub_fchmodat},
+    {"__assert2",(void*)stub_assert2},
+    {"__android_log_assert", (void*)stub_android_log_assert},
+    {"__FD_CLR_chk", (void*)stub_FD_CLR_chk},
+    {"dl_unwind_find_exidx", (void*)stub_dl_unwind_find_exidx},
+    {"freopen",  (void*)freopen},       {"fdopendir", (void*)stub_fdopendir},
+    {"statvfs",  (void*)statvfs},
+    {"fputwc",   (void*)fputwc},        {"getwc",    (void*)getwc},
+    {"ungetwc",  (void*)ungetwc},
+    {"sigsetjmp",(void*)stub_sigsetjmp}, {"siglongjmp", (void*)stub_siglongjmp},
+    {"glMapBufferOES",   (void*)stub_glMapBufferOES},
+    {"glUnmapBufferOES", (void*)stub_glUnmapBufferOES},
+
+    // ── remaining armeabi-v7a imports ────────────────────────────────────────
+    {"AAsset_openFileDescriptor", (void*)stub_AAsset_openFileDescriptor},
+    {"__fgets_chk",   (void*)stub_fgets_chk},   {"__strncpy_chk", (void*)stub_strncpy_chk},
+    {"__strrchr_chk", (void*)stub_strrchr_chk},
+    {"__progname",    (void*)&g_progname},      {"getprogname",   (void*)stub_getprogname},
+    {"arc4random_buf",(void*)stub_arc4random_buf},
+    {"arc4random_uniform", (void*)stub_arc4random_uniform},
+    {"asprintf",      (void*)stub_asprintf},    {"vsyslog",       (void*)stub_vsyslog},
+    {"strndup",       (void*)stub_strndup},     {"setbuf",        (void*)stub_setbuf},
+    {"pause",         (void*)stub_pause},       {"cacheflush",    (void*)stub_cacheflush},
+    {"epoll_create",  (void*)stub_epoll_create},{"epoll_create1", (void*)stub_epoll_create},
+    {"epoll_ctl",     (void*)stub_epoll_ctl},   {"epoll_wait",    (void*)stub_epoll_wait},
+    {"inotify_rm_watch", (void*)stub_inotify_rm_watch},
+    {"tgkill",        (void*)stub_tgkill},      {"timegm",        (void*)stub_timegm},
+    {"execv",         (void*)stub_execv},       {"execvpe",       (void*)stub_execvpe},
+    {"getppid",       (void*)stub_getppid},     {"wait4",         (void*)stub_wait4},
+    {"lrint",         (void*)stub_lrint},
+    {"strtoimax",     (void*)stub_strtoimax},   {"strtoumax",     (void*)stub_strtoumax},
+    {"__gnu_Unwind_Find_exidx", (void*)stub_dl_unwind_find_exidx},
+    {"_toupper_tab_", (void*)&_ctype_},
     {"syscall",         (void*)stub_syscall},
     {"getentropy",      (void*)stub_getentropy},
     {"getrandom",       (void*)stub_getrandom},
