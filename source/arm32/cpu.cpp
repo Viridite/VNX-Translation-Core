@@ -58,6 +58,37 @@ static bool condPass(CpuState& c, uint32_t cond) {
 // into data — and after a bad branch, "unimplemented instruction" is a
 // symptom rather than the fault. The neighbours settle it: real code
 // disassembles either side, garbage does not.
+// ── Branch trace ────────────────────────────────────────────────────────────
+// Two halts in a row have been "executing the wrong instruction set", and an
+// opcode cannot say how it got there. What matters is the last control
+// transfer before the fault and the mode either side of it — a branch that
+// should have exchanged and did not shows up immediately as ARM->ARM landing
+// on Thumb code.
+//
+// A 16-entry ring costs two stores per taken branch and nothing when nothing
+// goes wrong, which is the only kind of instrumentation worth leaving in an
+// interpreter's hot path.
+struct BrRec { uint32_t from, to; uint8_t was_t, now_t; };
+static BrRec  s_br[16];
+static uint32_t s_br_n = 0;
+
+static inline void traceBranch(uint32_t from, uint32_t to, bool was_t, bool now_t) {
+    BrRec& r = s_br[s_br_n & 15];
+    r.from = from; r.to = to; r.was_t = was_t; r.now_t = now_t;
+    s_br_n++;
+}
+
+void cpuDumpBranches(void) {
+    compatLog("arm32:   last control transfers (oldest first):");
+    uint32_t start = (s_br_n > 16) ? s_br_n - 16 : 0;
+    for (uint32_t i = start; i < s_br_n; i++) {
+        const BrRec& r = s_br[i & 15];
+        compatLogFmt("arm32:     0x%08x (%s) -> 0x%08x (%s)%s",
+                     r.from, r.was_t ? "T" : "A", r.to, r.now_t ? "T" : "A",
+                     (r.was_t != r.now_t) ? "   [mode change]" : "");
+    }
+}
+
 static void logUnimplContext(uint32_t pc) {
     char line[160]; int n = 0;
     n += snprintf(line + n, sizeof(line) - n, "arm32:   context");
@@ -467,6 +498,7 @@ static void stepArm(CpuState& c) {
 
     compatLogFmt("arm32: UNIMPL ARM insn=0x%08x pc=0x%x", insn, pc);
     logUnimplContext(pc);
+    cpuDumpBranches();
     c.halt = true; c.halt_pc = pc;
 }
 
@@ -770,6 +802,7 @@ static void stepThumb32(CpuState& c, uint32_t pc, uint16_t hw1) {
 
     compatLogFmt("arm32: UNIMPL Thumb2 %04x %04x pc=0x%x", hw1, hw2, pc);
     logUnimplContext(pc);
+    cpuDumpBranches();
     c.halt = true; c.halt_pc = pc;
 }
 
@@ -1020,7 +1053,13 @@ void cpuRun(CpuState& c) {
             c.halt = true; c.halt_pc = c.r[15]; break;
         }
 
+        const uint32_t before_pc = c.r[15];
+        const bool     before_t  = (c.cpsr & C_T) != 0;
         if (c.cpsr & C_T) stepThumb(c); else stepArm(c);
+        // A taken branch is any step that did not land on the next instruction.
+        const uint32_t seq = before_pc + (before_t ? 2u : 4u);
+        if (c.r[15] != seq && c.r[15] != before_pc + 4)
+            traceBranch(before_pc, c.r[15], before_t, (c.cpsr & C_T) != 0);
 
         // Periodic safety checks (cheap: once every 64k instructions).
         if ((++guard & 0xFFFF) == 0) {
