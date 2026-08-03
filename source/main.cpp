@@ -1512,6 +1512,11 @@ struct App {
 // used, just now the ALWAYS path instead of a fallback. This binary has no
 // interactive picker of its own any more; it always expects a package name.
 int main(int argc, char** argv) {
+    // Before anything allocates. The walk runs forward from here, so anchoring
+    // at the first game module left SDL's own blocks — including every texture
+    // and font allocation the render thread later trips over — outside the
+    // range being checked.
+    shimHeapAnchor();
     App app;
 
     if (!app.init()) return 1;
