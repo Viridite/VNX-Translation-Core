@@ -533,6 +533,9 @@ bool shimHeapCheck(char* why, size_t whysz) {
                      (const void*)prev_c, hex, asc);
             return false;
         }
+        const NlChunk* this_prev_c  = prev_c;
+        const size_t   this_prev_sz = prev_sz;
+        (void)this_prev_sz;
         prev_c  = c;
         prev_sz = sz;
         // Size zero is the end of the arena, not damage. memIsHeap answers for
@@ -570,6 +573,13 @@ bool shimHeapCheck(char* why, size_t whysz) {
         // in use. Any such chunk is on a bin, so its fd and bk are non-null by
         // construction; a null one is precisely the state that kills _free_r
         // at the unlink.
+        // The top chunk belongs to no bin, so its fd and bk are whatever was
+        // last there — reading them as bin pointers is what produced four
+        // "corruption" reports in a row, including one at the first constructor
+        // of the first module, before any game code had run. av_[2] names it
+        // exactly, so skip it by identity rather than by heuristic.
+        if (c == (const NlChunk*)__malloc_av_[2]) { c = next; continue; }
+
         if (!(next->size & NL_PREV_INUSE)) {
             if (!c->fd || !c->bk) {
                 // Report the neighbours too. Once one size is misread every
@@ -582,7 +592,7 @@ bool shimHeapCheck(char* why, size_t whysz) {
                          "free chunk %p (size %zu) fd=%p bk=%p at step %d; "
                          "prev %p size %zu",
                          (const void*)c, sz, (const void*)c->fd, (const void*)c->bk,
-                         i, (const void*)prev_c, prev_sz);
+                         i, (const void*)this_prev_c, this_prev_sz);
                 return false;
             }
         }
