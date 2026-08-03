@@ -428,6 +428,23 @@ struct App {
     // and the cache is capped so a pathological caller cannot grow it forever.
     struct GlyphTex { SDL_Texture* tex; int w, h; };
     std::map<std::string, GlyphTex> glyphCache;
+    // Advance widths, keyed by font and glyph only — width does not depend on
+    // colour. TTF_SizeUTF8 converts the UTF-8 it is handed before measuring,
+    // and that conversion allocates, so measuring a caption glyph by glyph
+    // every frame is as much of an allocation storm as rendering it was. This
+    // is the last one on the loading screen's path.
+    std::map<std::string, int> widthCache;
+
+    int glyphWidth(TTF_Font* f, const char* g) {
+        char kb[48];
+        snprintf(kb, sizeof(kb), "%p|%s", (void*)f, g);
+        auto it = widthCache.find(kb);
+        if (it != widthCache.end()) return it->second;
+        int w = 0, h = 0;
+        TTF_SizeUTF8(f, g, &w, &h);
+        if (widthCache.size() < 1024) widthCache.emplace(kb, w);
+        return w;
+    }
     static constexpr size_t GLYPH_CACHE_MAX = 512;
 
     int drawText(TTF_Font* f, const std::string& s, SDL_Color col, int x, int y) {
@@ -895,8 +912,8 @@ struct App {
         for (size_t i = 0; i < len;) {
             int n = utf8Len(s + i, len - i);
             char g[5] = {}; memcpy(g, s + i, (size_t)n);
-            int w = 0, h = 0; TTF_SizeUTF8(f, g, &w, &h);
-            total += w + track; i += (size_t)n;
+            total += glyphWidth(f, g) + track;
+            i += (size_t)n;
         }
         return total > 0 ? total - track : 0;
     }
@@ -909,10 +926,7 @@ struct App {
             int n = utf8Len(s + i, len - i);
             char g[5] = {}; memcpy(g, s + i, (size_t)n);
             i += (size_t)n;
-            if (g[0] == ' ' && n == 1) {
-                int w = 0, h = 0; TTF_SizeUTF8(f, " ", &w, &h);
-                x += w + track; continue;
-            }
+            if (g[0] == ' ' && n == 1) { x += glyphWidth(f, " ") + track; continue; }
             x += drawText(f, g, col, x, y) + track;
         }
     }
@@ -1234,6 +1248,7 @@ struct App {
                     // Drawn off-screen: what matters is the texture left in the
                     // cache, not the pixels.
                     drawText(fonts[fi], g, cols[fi], -1000, -1000);
+                    glyphWidth(fonts[fi], g);   // and its measurement
                     warmed++;
                 }
             }
