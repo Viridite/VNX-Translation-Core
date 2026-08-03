@@ -375,6 +375,8 @@ static void* sh_calloc(size_t a, size_t b) { g_sh_calloc_calls++; return calloc(
 // game code ran covers everything allocated since. This reports where the
 // chain first stops making sense, and the caller can run it between
 // constructors to name the one that broke it.
+extern "C" void* _sbrk_r(struct _reent*, ptrdiff_t);   // current break = arena end
+
 static void*  g_heap_anchor = nullptr;
 
 // One-word description of where an address lives, for fault reports. Naming
@@ -407,10 +409,34 @@ void shimHeapAnchor(void) {
 
 bool shimHeapCheck(char* why, size_t whysz) {
     if (!g_heap_anchor) return true;
+
+    // sbrk(0) is the true end of the arena. The previous version stopped at the
+    // first zero-size chunk, which it reached after 612 steps every run — so it
+    // examined a fraction of the heap and reported the rest clean without ever
+    // looking at it. That is why the corruption below went unseen: it sits past
+    // that point.
+    const uintptr_t arena_end = (uintptr_t)_sbrk_r(_REENT, 0);
+
     const NlChunk* c = (const NlChunk*)((char*)g_heap_anchor - 16);
-    for (int i = 0; i < 40000; i++) {
+    size_t prev_sz = 0;
+    for (int i = 0; i < 400000; i++) {
         if (!memIsHeap(c)) return true;             // walked out of the arena: done
+        if ((uintptr_t)c + 32 > arena_end) return true;   // reached the break
         size_t sz = nlSize(c);
+
+        // The invariant the fault actually violates. When PREV_INUSE is clear
+        // the previous chunk is free, and prev_size must equal its size —
+        // that pair is the boundary tag. _free_r trusts it to walk backwards,
+        // so a mismatch is precisely what sends it into untouched memory with a
+        // null forward pointer, which is the fault we keep seeing.
+        if (i > 0 && !(c->size & NL_PREV_INUSE) && c->prev_size != prev_sz) {
+            snprintf(why, whysz,
+                     "chunk %p: PREV_INUSE clear but prev_size %zu != previous "
+                     "chunk's size %zu — the block before it was overrun",
+                     (const void*)c, (size_t)c->prev_size, prev_sz);
+            return false;
+        }
+        prev_sz = sz;
         // Size zero is the end of the arena, not damage. memIsHeap answers for
         // the whole reserved heap region, but newlib has only sbrk'd part of
         // it — walk past the top chunk and the rest is mapped, readable and
@@ -419,7 +445,11 @@ bool shimHeapCheck(char* why, size_t whysz) {
         // reported exactly this at the same address and step in two different
         // modules, which is what a fixed arena boundary looks like and what
         // corruption does not.)
-        if (sz == 0) return true;
+        if (sz == 0) {
+            snprintf(why, whysz, "chunk %p has size 0 below the break (step %d)",
+                     (const void*)c, i);
+            return false;
+        }
         if (sz < 32 || (sz & 15) != 0) {
             snprintf(why, whysz, "chunk %p has bad size %zu (step %d)", (const void*)c, sz, i);
             return false;
