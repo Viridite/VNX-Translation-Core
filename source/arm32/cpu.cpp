@@ -296,6 +296,28 @@ static void stepArm(CpuState& c) {
         return;                                      // MCR (barrier/cache) = no-op
     }
 
+    // BLX (immediate) — ARM to Thumb, always.
+    //
+    // This lives in the unconditional space, where cond=0b1111 is part of the
+    // opcode rather than a condition, so it matches the plain B/BL pattern
+    // below and was being executed as a BL: right target, wrong instruction
+    // set. Execution carried on in ARM mode over Thumb code, and the first
+    // thing it met was a long-branch veneer, which decodes as a nonsense ARM
+    // instruction — 0x1cf0f240 is exactly the halfwords f240 1cf0 read as one
+    // word. The halt looked like a missing instruction and was really a
+    // missing mode switch.
+    //
+    // The H bit contributes an extra halfword to the offset, because a Thumb
+    // target only needs 2-byte alignment.
+    if (cond == 0xF && (insn & 0x0E000000) == 0x0A000000) {
+        int32_t off = (int32_t)(insn << 8) >> 6;         // sign-extend imm24<<2
+        off |= ((insn >> 24) & 1) << 1;                  // H
+        c.r[14]  = c.r[15];                              // LR = next instruction
+        c.cpsr  |= C_T;                                  // always exchanges
+        c.r[15]  = c.r[15] + 4 + off;                    // +8 pipeline
+        return;
+    }
+
     // Branch / BL (cond 101)
     if ((insn & 0x0E000000) == 0x0A000000) {
         int32_t off = (int32_t)(insn << 8) >> 6;         // sign-extend imm24<<2
