@@ -377,6 +377,14 @@ static void* sh_calloc(size_t a, size_t b) { g_sh_calloc_calls++; return calloc(
 // constructors to name the one that broke it.
 extern "C" void* _sbrk_r(struct _reent*, ptrdiff_t);   // current break = arena end
 
+// newlib's malloc arena. It lives in our .bss, not in the heap — which is why
+// a dozen clean heap walks meant nothing. av_[2] is the top chunk pointer, and
+// sysmalloc frees chunk2mem(top) when it extends the arena; that is precisely
+// the call that faults, with top pointing 375MB past the break at memory that
+// was never a chunk. Watching this one pointer catches the moment it goes bad.
+extern "C" void*  __malloc_av_[];
+extern "C" char*  __malloc_sbrk_base;
+
 static void*  g_heap_anchor = nullptr;
 
 // One-word description of where an address lives, for fault reports. Naming
@@ -446,6 +454,24 @@ bool shimHeapCheck(char* why, size_t whysz) {
     const uintptr_t arena_end = (uintptr_t)_sbrk_r(_REENT, 0);
     g_walk_steps = 0;
     g_walk_stop  = "completed";
+
+    // Check the arena before the heap. The top chunk must sit between the
+    // base sbrk handed out and the current break; anything else means the
+    // allocator's own state has been overwritten, and no amount of walking
+    // chunks would ever show it.
+    {
+        const uintptr_t top  = (uintptr_t)__malloc_av_[2];
+        const uintptr_t base = (uintptr_t)__malloc_sbrk_base;
+        if (base && top && (top < base || top >= arena_end)) {
+            snprintf(why, whysz,
+                     "malloc arena top=%p is outside [%p, %p) — newlib's av_ "
+                     "has been overwritten (av_ at %p)",
+                     (void*)top, (void*)base, (void*)arena_end,
+                     (void*)__malloc_av_);
+            g_walk_stop = "arena top invalid";
+            return false;
+        }
+    }
     // A break of 0 or -1 would make every bound below trivially true and turn
     // the whole walk into an immediate "clean" — say so rather than pretend.
     if (arena_end < 0x1000) { g_walk_stop = "sbrk returned nothing"; return true; }
