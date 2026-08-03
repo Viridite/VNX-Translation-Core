@@ -317,6 +317,11 @@ void elfRunCtors(LoadedSo* so, ProgressCb cb) {
     // Emit a UI update every ~50 ctors and at the end
     const size_t ui_interval = (n > 50) ? (n / 8) : n;
 
+    // Anchor before the first constructor so the walk below covers everything
+    // the game allocates.
+    shimHeapAnchor();
+    bool heap_ok = true;
+
     for (size_t k = 0; k < n; k++) {
         LoadedSo::InitFn fn = so->init_arr[k];
         if (!fn || fn == (LoadedSo::InitFn)(uintptr_t)-1) { skipped++; continue; }
@@ -329,6 +334,18 @@ void elfRunCtors(LoadedSo* so, ProgressCb cb) {
             g_in_recover = false;
             compatLogFmt("ELF: ctor[%zu/%zu] OK", k + 1, n);
             ok++;
+            // Report only the transition. Once the heap is broken it stays
+            // broken, and 300 identical complaints would bury the one line
+            // that matters — which constructor broke it.
+            if (heap_ok) {
+                char why[160];
+                if (!shimHeapCheck(why, sizeof(why))) {
+                    heap_ok = false;
+                    compatLogFmt("ELF: *** HEAP CORRUPTED BY ctor[%zu/%zu] @%p — %s",
+                                 k + 1, n, (void*)fn, why);
+                    compatLogFlush();
+                }
+            }
         } else {
             g_in_recover = false;
             char sym_buf[160];

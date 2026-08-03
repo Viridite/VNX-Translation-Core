@@ -363,6 +363,45 @@ void shimAllocCounts(unsigned long* m, unsigned long* c, unsigned long* r, unsig
 static void* sh_malloc(size_t n) { g_sh_malloc_calls++; return malloc(n); }
 static void* sh_calloc(size_t a, size_t b) { g_sh_calloc_calls++; return calloc(a, b); }
 
+// ─── Heap integrity walk ────────────────────────────────────────────────────
+// The arena is corrupt before anything faults: _malloc_r calls _free_r
+// internally, so the constructors that "fail" are simply the first ones to
+// allocate after the damage, and the render thread wedges for the same reason
+// when SDL_ttf allocates. Constructor 117 is the first to fault in every run,
+// which means something in the 116 before it does the damage — but nothing
+// logs, so which one is unknown.
+//
+// Chunks are contiguous, so walking forward from a block allocated before any
+// game code ran covers everything allocated since. This reports where the
+// chain first stops making sense, and the caller can run it between
+// constructors to name the one that broke it.
+static void*  g_heap_anchor = nullptr;
+
+void shimHeapAnchor(void) {
+    if (!g_heap_anchor) g_heap_anchor = malloc(64);
+}
+
+bool shimHeapCheck(char* why, size_t whysz) {
+    if (!g_heap_anchor) return true;
+    const NlChunk* c = (const NlChunk*)((char*)g_heap_anchor - 16);
+    for (int i = 0; i < 200000; i++) {
+        if (!memIsHeap(c)) return true;             // walked out of the arena: done
+        size_t sz = nlSize(c);
+        if (sz < 32 || (sz & 15) != 0) {
+            snprintf(why, whysz, "chunk %p has size %zu (step %d)", (const void*)c, sz, i);
+            return false;
+        }
+        const NlChunk* next = (const NlChunk*)((const char*)c + sz);
+        if (next <= c) {
+            snprintf(why, whysz, "chunk %p does not advance (step %d)", (const void*)c, i);
+            return false;
+        }
+        if (!memIsHeap(next)) return true;          // reached the top
+        c = next;
+    }
+    return true;                                     // gave up before finding fault
+}
+
 static void sh_free(void* p) {
     if (!p) return;
     g_sh_free_calls++;

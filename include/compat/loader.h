@@ -257,6 +257,12 @@ unsigned long shimFreeCallCount(void);
 void          shimAllocCounts(unsigned long* malloc_n, unsigned long* calloc_n,
                               unsigned long* realloc_n, unsigned long* free_n);
 
+// Heap integrity. shimHeapAnchor must be called before any game code runs;
+// shimHeapCheck then walks forward from that point and returns false with a
+// reason once the chunk chain stops making sense.
+void          shimHeapAnchor(void);
+bool          shimHeapCheck(char* why, size_t whysz);
+
 // Tell the loader what the game's manifest asked for, before launchApk.
 // Raw android:screenOrientation constant; -1 for unspecified.
 void         loaderSetScreenOrient(int screen_orientation);
