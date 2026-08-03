@@ -246,6 +246,11 @@ void         installStatusWrite(const char* state, const char* pkg, const char* 
                                 const char* stage, int pct);
 void         installStatusClear(void);
 
+// Faults recovered from while running game constructors. Only meaningful next
+// to the main thread's watchdog phase — the question is always whether the two
+// line up in time.
+int          elfGetCtorFaultCount(void);
+
 // Called by jni_env.cpp when the game signals its own loading/splash screen
 // is done (splashScreenHasCompleted). Hides the Viridite branding
 // overlay drawn over the game's loading screen (see loader.cpp).

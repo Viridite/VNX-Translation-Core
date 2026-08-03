@@ -158,9 +158,9 @@ static void watchdogThreadFn(void*) {
             // and the watchdog would die silently along with it.
             snprintf(buf, sizeof(buf),
                      "WATCHDOG: main thread has not advanced for %ds — "
-                     "wedged in '%s' (frame %llu)",
+                     "wedged in '%s' (frame %llu, %d ctor faults so far)",
                      (stuck + 1) * 2, g_main_phase.load(std::memory_order_relaxed),
-                     (unsigned long long)f);
+                     (unsigned long long)f, elfGetCtorFaultCount());
             compatLogRaw(buf);
             if (stuck == 0) probeAllocator();
             stuck++;
@@ -991,18 +991,25 @@ struct App {
         }
 
         if (gemTex && gemFrame && gemAlpha > 0.01f) {
-            mainPhase("draw/gemRenderTarget");
+            mainPhase("gem/GetRenderTarget");
             SDL_Texture* prev = SDL_GetRenderTarget(rdr);
+            mainPhase("gem/SetRenderTarget(gemFrame)");
             SDL_SetRenderTarget(rdr, gemFrame);
+            mainPhase("gem/SetRenderDrawColor");
             SDL_SetRenderDrawColor(rdr, 0, 0, 0, 0);
+            mainPhase("gem/RenderClear");
             SDL_RenderClear(rdr);
+            mainPhase("gem/RenderCopy(gemTex)");
             SDL_RenderCopy(rdr, gemTex, nullptr, nullptr);
             if (sweepTex) {
+                mainPhase("gem/RenderCopyEx(sweep)");
                 float p = ((now % 2800) / 2800.0f) / 0.55f; if (p > 1.0f) p = 1.0f;
                 SDL_Rect sd = {(int)(-221.0f + p * 541.0f), 0, 57, GEM_PX};
                 SDL_RenderCopyEx(rdr, sweepTex, nullptr, &sd, -18.0, nullptr, SDL_FLIP_NONE);
             }
+            mainPhase("gem/SetRenderTarget(restore)");
             SDL_SetRenderTarget(rdr, prev);
+            mainPhase("gem/blitGem");
             int gw = (int)(GEM_PX * gemScale + 0.5f);
             SDL_Rect gd = {SW / 2 - gw / 2, (int)(GEM_CY - gw / 2 + lift + 0.5f), gw, gw};
             SDL_SetTextureAlphaMod(gemFrame, (Uint8)(gemAlpha * 255));

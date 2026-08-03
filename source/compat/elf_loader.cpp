@@ -33,6 +33,11 @@ volatile uint64_t g_recover_far = 0;  // Fault Address Register
 volatile uint64_t g_recover_lr  = 0;   // x30, the return address
 volatile uint64_t g_recover_x0  = 0;   // first operand, usually the null one
 volatile uint64_t g_recover_x8  = 0;
+// Counted in the handler so the watchdog can print it next to the main
+// thread's phase — the two only mean something together. Kept a plain volatile
+// int rather than an atomic: this runs on libnx's shared exception stack, and
+// the handler's recovery path must stay as close to nothing as possible.
+volatile int      g_ctor_faults = 0;
 
 // ─── Heap canaries ───────────────────────────────────────────────────────────
 // Brain It On dies with 155 faults inside newlib's free(), unlinking a chunk
@@ -94,6 +99,7 @@ extern "C" void __libnx_exception_handler(ThreadExceptionDump* ctx) {
         g_recover_lr  = ctx->lr.x;
         g_recover_x0  = ctx->cpu_gprs[0].x;
         g_recover_x8  = ctx->cpu_gprs[8].x;
+        g_ctor_faults++;
         longjmp(g_recover_jmp, 1);
     }
     logUnrecoveredFault(ctx);
@@ -1212,3 +1218,6 @@ LoadedSo* elfLoad(const char* path, ProgressCb cb) {
                  so->sym_count, g_unresolved_count);
     return so;
 }
+
+// Number of faults recovered from since load began. Read by the watchdog.
+int elfGetCtorFaultCount(void) { return g_ctor_faults; }
