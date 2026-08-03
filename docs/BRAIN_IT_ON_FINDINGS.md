@@ -63,6 +63,33 @@ The stall is a symptom, not a separate bug.
 - **Not the audio lock hazard.** That was a real bug and is fixed, but it can
   only stall, not corrupt a free list.
 
+## Update: the corruption theory did not survive testing
+
+Heap canaries were added around the loader's large allocations and checked
+after the segment copy, the strtab/symtab copy, and the constructors. On
+hardware **no canary was ever damaged**, while the 155 free() faults still
+occurred. All three write paths were also read and confirmed bounds-checked:
+
+| Write path | Bounds-checked |
+|---|---|
+| strtab/symtab heap copies | yes — `malloc(n)` then `memcpy(n)` |
+| relocation writes (`r_offset`) | yes — both ends, skipped + logged if outside |
+| segment copies (`p_vaddr`+`p_filesz`) | yes — against `stage`/`alloc_size` |
+
+So the loader is not overrunning anything, and "we corrupt the heap" is very
+likely wrong.
+
+A better fit for the evidence: **the game frees pointers our allocator never
+returned.** il2cpp ships its own allocators, and a pointer allocated by one and
+released through newlib's `free()` walks a chunk header that was never written
+by newlib — giving exactly this signature, a garbage/NULL `fd` dereferenced
+during unlink, with our own heap intact. That would also explain why the fault
+count tracks constructor count so closely.
+
+Testing that means logging the pointer passed to `free()` and checking whether
+it lies inside a region newlib ever handed out, rather than adding more guards
+around our own allocations.
+
 ## Where to look next
 
 Something writes past the end of a heap allocation before/while the game's

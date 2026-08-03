@@ -1063,8 +1063,17 @@ struct App {
             SDL_Delay(16); // ~60fps
         }
 
+        // The loader has signalled; the main thread is past its wait loop. Two
+        // uninstrumented things sit between here and the join, and Brain It On
+        // stops somewhere in them: the log ends at the loader's own
+        // "launchApk returned" and the join marker never appears. Bracketing
+        // the final render separates "stuck waiting" from "stuck rendering".
+        compatLog("loader: wait loop exited — rendering final frame");
+        compatLogFlush();
         // Render a final frame so the last log line is visible
         showProgress();
+        compatLog("loader: final frame rendered");
+        compatLogFlush();
 
         // The loader thread must never wedge the console. If the user asked to
         // quit and it doesn't wind down promptly (e.g. a hung native game-init
@@ -1094,7 +1103,32 @@ struct App {
         // visible in the log instead of inferable from an absence.
         compatLog("loader: work finished, joining loader thread");
         compatLogFlush();
-        threadWaitForExit(&t);
+        // The loader has already signalled done, so its work is over — but the
+        // thread itself can still fail to terminate (Unity's constructors spawn
+        // threads, and 155 of them faulted out through longjmp). Waiting
+        // forever turns "the game didn't start" into "the console needs a power
+        // hold", which is a far worse outcome than giving up on the join.
+        {
+            Uint32 t0 = SDL_GetTicks();
+            bool exited = false;
+            while (!exited) {
+                // 100ms slices on the thread's own handle, so the UI keeps
+                // drawing instead of freezing on an indefinite join.
+                if (R_SUCCEEDED(svcWaitSynchronizationSingle(t.handle, 100000000ULL))) {
+                    exited = true;
+                    break;
+                }
+                if (SDL_GetTicks() - t0 > 10000) {
+                    compatLog("loader: thread has not exited after 10s — "
+                              "continuing without it rather than wedging");
+                    compatLogFlush();
+                    break;
+                }
+                SDL_Event ev; while (SDL_PollEvent(&ev)) {}
+                showProgress();
+            }
+            if (exited) threadWaitForExit(&t);   // reap it properly
+        }
         compatLog("loader: thread joined");
         compatLogFlush();
         threadClose(&t);
