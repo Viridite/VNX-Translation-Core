@@ -52,6 +52,24 @@ static bool condPass(CpuState& c, uint32_t cond) {
 // All guest memory access is bounds-checked so a wild pointer or stack can
 // never read/write the Core's own host memory (which could corrupt the system).
 // OOB reads return 0; OOB writes are dropped (both logged, rate-limited).
+// Surrounding halfwords when the decoder gives up.
+//
+// An opcode on its own does not say whether it is real code or a wild jump
+// into data — and after a bad branch, "unimplemented instruction" is a
+// symptom rather than the fault. The neighbours settle it: real code
+// disassembles either side, garbage does not.
+static void logUnimplContext(uint32_t pc) {
+    char line[160]; int n = 0;
+    n += snprintf(line + n, sizeof(line) - n, "arm32:   context");
+    for (int i = -4; i <= 4 && n < (int)sizeof(line) - 10; i++) {
+        uint32_t a = pc + i * 2;
+        if (!guestValid(a, 2)) continue;
+        n += snprintf(line + n, sizeof(line) - n, " %s%04x",
+                      i == 0 ? ">" : "", *(uint16_t*)toHost(a));
+    }
+    compatLog(line);
+}
+
 static void memFault(const char* op, uint32_t g) {
     static int n = 0;
     if (n < 64) { n++; compatLogFmt("arm32: OOB %s at guest 0x%x — contained", op, g); }
@@ -426,6 +444,7 @@ static void stepArm(CpuState& c) {
     }
 
     compatLogFmt("arm32: UNIMPL ARM insn=0x%08x pc=0x%x", insn, pc);
+    logUnimplContext(pc);
     c.halt = true; c.halt_pc = pc;
 }
 
@@ -728,6 +747,7 @@ static void stepThumb32(CpuState& c, uint32_t pc, uint16_t hw1) {
     }
 
     compatLogFmt("arm32: UNIMPL Thumb2 %04x %04x pc=0x%x", hw1, hw2, pc);
+    logUnimplContext(pc);
     c.halt = true; c.halt_pc = pc;
 }
 

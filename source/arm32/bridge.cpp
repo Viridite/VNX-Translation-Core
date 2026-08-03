@@ -21,7 +21,78 @@ static std::vector<Import> s_imports;
 // Guest FILE* handle table: a guest "FILE*" is (index into s_files)+1, so 0 is
 // a clean NULL. gfile() maps a handle back to the host FILE*.
 static std::vector<FILE*> s_files;
-static FILE* gfile(uint32_t h) { return (h && h <= s_files.size()) ? s_files[h-1] : nullptr; }
+static FILE* gfile(uint32_t h) {
+    // &__sF[0..2] are the standard streams. The game gets these by taking an
+    // address inside the imported array rather than by calling fopen, so they
+    // never pass through the handle table and have to be recognised here.
+    if (g_a32_sF && h >= g_a32_sF && h < g_a32_sF + 3 * A32_FILE_STRIDE) {
+        switch ((h - g_a32_sF) / A32_FILE_STRIDE) {
+            case 0: return stdin;
+            case 1: return stdout;
+            default: return stderr;
+        }
+    }
+    return (h && h <= s_files.size()) ? s_files[h-1] : nullptr;
+}
+
+// ── Imported data symbols ───────────────────────────────────────────────────
+// Handing these a call sentinel is what produced the repeated
+// "OOB rd32 at guest 0xe0000000" in the log: the game was dereferencing an
+// address that only means anything as a jump target. They need storage with
+// the right contents instead.
+static uint32_t s_data_next = A32_DATA_BASE;
+
+static uint32_t dataAlloc(uint32_t bytes) {
+    bytes = (bytes + 15) & ~15u;
+    if (s_data_next + bytes > A32_DATA_BASE + A32_DATA_SIZE) return 0;
+    uint32_t g = s_data_next;
+    s_data_next += bytes;
+    memset(toHost(g), 0, bytes);
+    return g;
+}
+
+// Guest addresses of the three standard streams inside our fake __sF, so the
+// file bridge can recognise them when the game passes &__sF[n] to fprintf.
+uint32_t g_a32_sF = 0;
+
+uint32_t bridgeRegisterData(const char* name) {
+    if (!name) return 0;
+
+    if (!strcmp(name, "__sF")) {
+        // bionic's FILE is opaque and the game only ever takes addresses out of
+        // this array, so the contents do not matter — only that &__sF[0..2] are
+        // distinct, stable, readable addresses the bridge can map back to
+        // stdin, stdout and stderr.
+        if (!g_a32_sF) {
+            g_a32_sF = dataAlloc(3 * A32_FILE_STRIDE);
+            compatLogFmt("arm32: __sF at guest 0x%x (stdin/stdout/stderr)", g_a32_sF);
+        }
+        return g_a32_sF;
+    }
+    if (!strcmp(name, "__stack_chk_guard")) {
+        static uint32_t g = 0;
+        if (!g) { g = dataAlloc(4); if (g) *(uint32_t*)toHost(g) = 0xDEADC0DE; }
+        return g;
+    }
+    if (!strcmp(name, "_toupper_tab_")) {
+        // Bionic indexes this from -128, so the table pointer sits 128 entries
+        // in. Two bytes per entry, EOF plus 256 values either side.
+        static uint32_t g = 0;
+        if (!g) {
+            uint32_t base = dataAlloc(2 * 385);
+            if (base) {
+                uint16_t* t = (uint16_t*)toHost(base);
+                for (int i = 0; i < 385; i++) {
+                    int ch = i - 128;
+                    t[i] = (uint16_t)((ch >= 'a' && ch <= 'z') ? ch - 32 : ch);
+                }
+                g = base + 128 * 2;
+            }
+        }
+        return g;
+    }
+    return 0;   // not a data symbol we know — caller falls back to a sentinel
+}
 
 uint32_t bridgeRegister(const char* name) {
     for (size_t i = 0; i < s_imports.size(); i++)

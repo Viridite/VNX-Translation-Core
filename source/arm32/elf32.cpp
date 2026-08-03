@@ -37,7 +37,13 @@ static uint32_t resolveSym(const Sym& s) {
     const char* nm = symName(s);
     if (s.shndx != 0 /*SHN_UNDEF*/ && s.value)      // defined here
         return s_bias + s.value;
-    if (nm && nm[0]) return bridgeRegister(nm);     // import → sentinel
+    if (nm && nm[0]) {
+        // A data symbol needs storage, not a jump target. Ask first: a sentinel
+        // handed to a variable is read straight through and yields zero, which
+        // is a wrong answer the game carries on with rather than a stop.
+        if (uint32_t d = bridgeRegisterData(nm)) return d;
+        return bridgeRegister(nm);                 // function import → sentinel
+    }
     return 0;
 }
 

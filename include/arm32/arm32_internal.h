@@ -15,6 +15,20 @@ static constexpr uint32_t A32_STACK_SIZE  = 0x00800000;  // 8 MiB
 // Imports resolve to sentinel PCs the interpreter traps instead of executing.
 // Deliberately outside the region so a stray data access never lands here.
 static constexpr uint32_t A32_SENTINEL_BASE = 0xE0000000;
+// Imported DATA symbols get real guest memory here, not a sentinel.
+//
+// A sentinel is a PC the interpreter traps, which works for a function and is
+// meaningless for a variable: the game reads through it and gets whatever an
+// out-of-region read returns, which is zero. libgame.so imports three —
+// __sF (bionic's stdio FILE array, where stdout and stderr live),
+// __stack_chk_guard and _toupper_tab_ — and reading any of them as zero is a
+// silent wrong answer rather than a stop. This arena sits below the ELF, in
+// the 16MiB that was otherwise unused.
+static constexpr uint32_t A32_DATA_BASE = 0x00100000;
+static constexpr uint32_t A32_DATA_SIZE = 0x00080000;
+// Stride between entries in our fake __sF. Any value works as long as the
+// three stream addresses stay distinct and aligned.
+static constexpr uint32_t A32_FILE_STRIDE = 0x60;
 // LR value used when calling a guest function from the host — the interpreter
 // stops cleanly when PC returns here.
 static constexpr uint32_t A32_RETURN_TRAP = 0xFFFFFFF0;
@@ -51,6 +65,9 @@ uint32_t elf32Sym(const char* name);
 void bridgeCall(CpuState& cpu, uint32_t sentinel);
 // Register the name a sentinel maps to (called during import resolution).
 uint32_t bridgeRegister(const char* name);
+// Storage for an imported DATA symbol, or 0 if it is not one we know.
+uint32_t bridgeRegisterData(const char* name);
+extern uint32_t g_a32_sF;   // guest &__sF[0]; streams are +n*A32_FILE_STRIDE
 
 // ── Interpreter (cpu.cpp) ───────────────────────────────────────────────────
 // Run until halt (unimplemented insn, sentinel with no LR, or explicit stop).
