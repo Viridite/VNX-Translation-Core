@@ -260,6 +260,7 @@ void          shimAllocCounts(unsigned long* malloc_n, unsigned long* calloc_n,
 // Heap integrity. shimHeapAnchor must be called before any game code runs;
 // shimHeapCheck then walks forward from that point and returns false with a
 // reason once the chunk chain stops making sense.
+const char*   shimAddrRegion(uint64_t addr);
 void          shimHeapAnchor(void);
 bool          shimHeapCheck(char* why, size_t whysz);
 

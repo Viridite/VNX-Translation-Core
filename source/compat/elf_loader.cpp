@@ -48,6 +48,10 @@ volatile uint64_t g_recover_far = 0;  // Fault Address Register
 volatile uint64_t g_recover_lr  = 0;   // x30, the return address
 volatile uint64_t g_recover_x0  = 0;   // first operand, usually the null one
 volatile uint64_t g_recover_x8  = 0;
+// x6 holds the chunk _free_r is unlinking at the faulting instruction. Whether
+// it points into the heap is the whole question: a real chunk means the walk
+// is missing something, and a wild pointer means free() was handed rubbish.
+volatile uint64_t g_recover_x6  = 0;
 // Counted in the handler so the watchdog can print it next to the main
 // thread's phase — the two only mean something together. Kept a plain volatile
 // int rather than an atomic: this runs on libnx's shared exception stack, and
@@ -117,6 +121,7 @@ extern "C" void __libnx_exception_handler(ThreadExceptionDump* ctx) {
         g_recover_lr  = ctx->lr.x;
         g_recover_x0  = ctx->cpu_gprs[0].x;
         g_recover_x8  = ctx->cpu_gprs[8].x;
+        g_recover_x6  = ctx->cpu_gprs[6].x;
         g_recover_fp  = ctx->fp.x;
         g_recover_sp  = ctx->sp.x;
         g_ctor_faults++;
@@ -360,11 +365,13 @@ void elfRunCtors(LoadedSo* so, ProgressCb cb) {
             char lr_buf[192];
             elfDescribePc(g_recover_lr, lr_buf, sizeof(lr_buf));
             compatLogFmt("ELF: ctor[%zu/%zu] FAULT sig=%d esr=0x%08x pc=%p far=%p sym=%s "
-                         "lr=%p (%s) x0=%p x8=%p — skipped",
+                         "lr=%p (%s) x0=%p x6=%p(%s) x8=%p — skipped",
                          k + 1, n, g_recover_sig, g_recover_esr,
                          (void*)g_recover_pc, (void*)g_recover_far, sym_buf,
                          (void*)g_recover_lr, lr_buf,
-                         (void*)g_recover_x0, (void*)g_recover_x8);
+                         (void*)g_recover_x0,
+                         (void*)g_recover_x6, shimAddrRegion(g_recover_x6),
+                         (void*)g_recover_x8);
             // Only the first few: 155 identical faults would bury the log, and
             // they all come from the same place.
             if (g_ctor_faults <= 3) logFaultBacktrace();

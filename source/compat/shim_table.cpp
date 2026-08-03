@@ -377,6 +377,30 @@ static void* sh_calloc(size_t a, size_t b) { g_sh_calloc_calls++; return calloc(
 // constructors to name the one that broke it.
 static void*  g_heap_anchor = nullptr;
 
+// One-word description of where an address lives, for fault reports. Naming
+// the region turns "x6 is some number" into "free() was called on something
+// that was never heap".
+const char* shimAddrRegion(uint64_t a) {
+    if (!a) return "null";
+    MemoryInfo mi = {}; u32 pi = 0;
+    if (R_FAILED(svcQueryMemory(&mi, &pi, a))) return "unmapped";
+    switch (mi.type) {
+        case MemType_Heap:              return "heap";
+        case MemType_CodeStatic:
+        case MemType_CodeMutable:       return "code";
+        // The game's modules are mapped with svcMapProcessCodeMemory, so a
+        // chunk pointer landing here means free() was handed something out of
+        // the game's own image rather than an allocation.
+        case MemType_ModuleCodeStatic:
+        case MemType_ModuleCodeMutable: return "game-module";
+        case MemType_MappedMemory:
+        case MemType_WeirdMappedMem:    return "mapped";
+        case MemType_ThreadLocal:       return "tls";
+        case MemType_Unmapped:          return "unmapped";
+        default:                        return "other";
+    }
+}
+
 void shimHeapAnchor(void) {
     if (!g_heap_anchor) g_heap_anchor = malloc(64);
 }
