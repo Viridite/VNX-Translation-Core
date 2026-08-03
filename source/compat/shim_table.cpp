@@ -360,8 +360,26 @@ void shimAllocCounts(unsigned long* m, unsigned long* c, unsigned long* r, unsig
 // is the difference between "the game barely allocates through libc" and "it
 // allocates through libc and frees through something else entirely" — and only
 // the second explains a fault in _free_r with our free shim barely called.
-static void* sh_malloc(size_t n) { g_sh_malloc_calls++; return malloc(n); }
-static void* sh_calloc(size_t a, size_t b) { g_sh_calloc_calls++; return calloc(a, b); }
+// Check the arena immediately before delegating.
+//
+// Sampling av->top every 20ms never caught anything, and the reason is
+// structural: sysmalloc sets av->top to the NEW top before freeing the old
+// one, so by the time anything else can look, the pointer is valid again. The
+// bad value is old_top, a local, read from av->top at the instant the game
+// called malloc. This is that instant — the last point we control before
+// newlib reads it.
+static void arenaGate(const char* who) {
+    static int reported = 0;
+    if (reported >= 3) return;
+    char why[400];
+    if (shimHeapCheckFast(why, sizeof(why))) return;
+    reported++;
+    compatLogFmt("ARENA: bad on entry to %s during %s ctor[%d] — %s",
+                 who, elfCurrentModule(), elfCurrentCtor(), why);
+}
+
+static void* sh_malloc(size_t n) { g_sh_malloc_calls++; arenaGate("malloc"); return malloc(n); }
+static void* sh_calloc(size_t a, size_t b) { g_sh_calloc_calls++; arenaGate("calloc"); return calloc(a, b); }
 
 // ─── Heap integrity walk ────────────────────────────────────────────────────
 // The arena is corrupt before anything faults: _malloc_r calls _free_r
@@ -662,6 +680,7 @@ bool shimHeapCheck(char* why, size_t whysz) {
 static void sh_free(void* p) {
     if (!p) return;
     g_sh_free_calls++;
+    arenaGate("free");
     if (!memIsHeap(p)) {
         static int warned = 0;
         if (warned < 20) {
@@ -689,6 +708,7 @@ static void sh_free(void* p) {
 }
 static void* sh_realloc(void* p, size_t n) {
     g_sh_realloc_calls++;
+    arenaGate("realloc");
     if (p && (!memIsHeap(p) || !looksLikeNewlibChunk(p))) {
         compatLogFmt("realloc: unowned ptr %p — returning fresh block", p);
         return malloc(n);
