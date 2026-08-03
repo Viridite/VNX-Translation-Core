@@ -102,6 +102,53 @@ struct LoaderCtx {
 
 static LoaderCtx* g_loader_ctx = nullptr;
 
+// ── Main-thread watchdog ────────────────────────────────────────────────────
+// Brain It On stops with the log ending at the loader's "launchApk returned",
+// and the very next statement on that thread is the atomic store of `done`.
+// So `done` is set — which means the main thread never got back to the top of
+// its wait loop, i.e. it is wedged inside the loop body. The body doesn't log,
+// so the log simply stops and every call in it is equally suspect.
+//
+// Rather than logging every frame (which floods the file and adds SD writes to
+// the very path under suspicion), the main thread just bumps a counter and
+// publishes the name of the call it is about to make. A watchdog thread checks
+// the counter every two seconds and says nothing while it advances — so a
+// healthy run costs one atomic store per phase and zero log lines. If the
+// counter stops, it names the call that never returned, and keeps saying so.
+static std::atomic<const char*> g_main_phase {"start"};
+static std::atomic<uint64_t>    g_main_frames{0};
+static std::atomic<bool>        g_watchdog_stop{false};
+
+static inline void mainPhase(const char* p) {
+    g_main_phase.store(p, std::memory_order_relaxed);
+}
+
+static void watchdogThreadFn(void*) {
+    uint64_t last = ~0ull;
+    int      stuck = 0;
+    while (!g_watchdog_stop.load(std::memory_order_acquire)) {
+        svcSleepThread(2000000000ULL);   // 2s
+        if (g_watchdog_stop.load(std::memory_order_acquire)) break;
+        uint64_t f = g_main_frames.load(std::memory_order_relaxed);
+        if (f == last) {
+            char buf[192];
+            // compatLogRaw, not compatLog: if the main thread wedged while
+            // holding the log mutex, the ordinary path would block here too
+            // and the watchdog would die silently along with it.
+            snprintf(buf, sizeof(buf),
+                     "WATCHDOG: main thread has not advanced for %ds — "
+                     "wedged in '%s' (frame %llu)",
+                     (stuck + 1) * 2, g_main_phase.load(std::memory_order_relaxed),
+                     (unsigned long long)f);
+            compatLogRaw(buf);
+            stuck++;
+        } else {
+            stuck = 0;
+        }
+        last = f;
+    }
+}
+
 // Progress callback — called from loader thread.
 // Updates shared state only; never touches SDL (wrong thread).
 static void progressCallback(const char* stage, const char* /*detail*/) {
@@ -857,7 +904,9 @@ struct App {
     // ------------------------------------------------------------------
     void showProgress() {
         Uint32 now = SDL_GetTicks();
+        mainPhase("showProgress/buildBootAssets");
         buildBootAssets();
+        mainPhase("showProgress/draw");
 
         // Track elapsed time per stage
         static char   s_stage[80] = {};
@@ -991,13 +1040,16 @@ struct App {
         // ── Footer wordmark ──
         drawTrackedCentered(fBootF, "VIRIDITE", {0, 102, 51, 77}, SW / 2, SH - 48, 3);
 
-        if (showLogPanel) drawLogPanel();
+        if (showLogPanel) { mainPhase("showProgress/logPanel"); drawLogPanel(); }
 
         if (!shotLoading && g_ui_pct >= 40) {  // mid-load, gem in frame
             shotLoading = true;
+            mainPhase("showProgress/screenshot");
             saveScreenshot("ui_loading.png");
         }
+        mainPhase("showProgress/SDL_RenderPresent");
         SDL_RenderPresent(rdr);
+        mainPhase("showProgress/done");
     }
 
     // ------------------------------------------------------------------
@@ -1045,9 +1097,15 @@ struct App {
                      0x100000 /*1MB stack*/, 0x2C, 1 /*CPU 1*/);
         threadStart(&t);
 
+        Thread wd;
+        bool wdOk = R_SUCCEEDED(threadCreate(&wd, watchdogThreadFn, nullptr, nullptr,
+                                             0x4000 /*16KB stack*/, 0x3B, 2 /*CPU 2*/)) &&
+                    R_SUCCEEDED(threadStart(&wd));
+
         // Main thread render loop — keeps the UI alive until the loader finishes
         bool quitting = false;
         while (!ctx.done.load(std::memory_order_acquire) && !quitting) {
+            mainPhase("waitLoop/SDL_PollEvent");
             SDL_Event ev;
             while (SDL_PollEvent(&ev)) {
                 if (ev.type == SDL_QUIT) quitting = true;
@@ -1060,7 +1118,10 @@ struct App {
             // loader thread can exit instead of the app appearing to hang.
             if (quitting) a32::requestAbort();
             showProgress();
+            mainPhase("waitLoop/SDL_Delay");
             SDL_Delay(16); // ~60fps
+            mainPhase("waitLoop/checkDone");
+            g_main_frames.fetch_add(1, std::memory_order_relaxed);
         }
 
         // The loader has signalled; the main thread is past its wait loop. Two
@@ -1132,6 +1193,12 @@ struct App {
         compatLog("loader: thread joined");
         compatLogFlush();
         threadClose(&t);
+        if (wdOk) {
+            g_watchdog_stop.store(true, std::memory_order_release);
+            svcCancelSynchronization(wd.handle);   // break the 2s sleep early
+            threadWaitForExit(&wd);
+            threadClose(&wd);
+        }
         g_loader_ctx = nullptr;
 
         // FastLoad throttles the GPU to its minimum clock — fine while we're

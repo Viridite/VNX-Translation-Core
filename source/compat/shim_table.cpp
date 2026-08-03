@@ -837,18 +837,65 @@ static char* stub_getcwd(char* buf, size_t sz) {
 }
 // getrandom(2) works (libnx CSRNG) — libc++'s std::random_device may use it.
 // Other syscall numbers are logged so the compat log shows what the game wanted.
+// Defined further down, next to their named-symbol siblings.
+static pid_t stub_getpid(void);
+static uid_t stub_getuid(void);
+static gid_t stub_getgid(void);
+static pid_t stub_gettid(void);
+
 static long stub_syscall(long n, ...) {
-    if (n == 278 /* __NR_getrandom, arm64 */) {
-        va_list va; va_start(va, n);
-        void*  buf = va_arg(va, void*);
-        size_t len = va_arg(va, size_t);
-        va_end(va);
-        if (buf && len) randomGet(buf, len);
-        return (long)len;
+    va_list va; va_start(va, n);
+    long r;
+    switch (n) {
+        // Numbers are the arm64 (asm-generic) ABI. A game reaching libc through
+        // raw syscall() rather than the named entry point got ENOSYS even where
+        // we already had a perfectly good shim for it — Brain It On asks for
+        // 178 (gettid) during its constructors and was told the kernel has no
+        // such call. Route the ones we can answer to the same implementations
+        // the named symbols use, so it doesn't matter which door the game came
+        // through. Anything genuinely unsupported still logs and fails.
+        case 278: {  // getrandom
+            void*  buf = va_arg(va, void*);
+            size_t len = va_arg(va, size_t);
+            if (buf && len) randomGet(buf, len);
+            r = (long)len;
+            break;
+        }
+        case 101: {  // nanosleep
+            const struct timespec* req = va_arg(va, const struct timespec*);
+            if (req) svcSleepThread((u64)req->tv_sec * 1000000000ULL + (u64)req->tv_nsec);
+            r = 0;
+            break;
+        }
+        case 113: {  // clock_gettime
+            int              cid = va_arg(va, int);
+            struct timespec* ts  = va_arg(va, struct timespec*);
+            r = ts ? clock_gettime(cid, ts) : -1;
+            break;
+        }
+        case 169: {  // gettimeofday
+            struct timeval* tv = va_arg(va, struct timeval*);
+            void*           tz = va_arg(va, void*);
+            (void)tz;
+            r = tv ? gettimeofday(tv, nullptr) : -1;
+            break;
+        }
+        case 124: r = stub_sched_yield();      break;
+        case 172: r = stub_getpid();           break;  // getpid
+        case 173: r = stub_getpid();           break;  // getppid — no parent here
+        case 174: r = stub_getuid();           break;  // getuid
+        case 175: r = stub_getuid();           break;  // geteuid
+        case 176: r = stub_getgid();           break;  // getgid
+        case 177: r = stub_getgid();           break;  // getegid
+        case 178: r = stub_gettid();           break;  // gettid
+        default:
+            va_end(va);
+            compatLogFmt("syscall(%ld) → ENOSYS", n);
+            errno = ENOSYS;
+            return -1;
     }
-    compatLogFmt("syscall(%ld) → ENOSYS", n);
-    errno = ENOSYS;
-    return -1;
+    va_end(va);
+    return r;
 }
 // Bionic API-28 entropy entry points (in case the game links them directly)
 static int stub_getentropy(void* buf, size_t len) {
@@ -916,7 +963,20 @@ static int stub_prctl(int, unsigned long, unsigned long, unsigned long, unsigned
 }
 
 // ─── gettid (Linux syscall — thread ID, not in newlib) ──────────────────────
-static pid_t stub_gettid(void) { return 1; }
+// This returned a constant 1, which made every thread in the process look like
+// the same thread to anything that keys on the tid — and il2cpp registers its
+// threads that way, so its per-thread bookkeeping all collided on one slot.
+// Worse, `gettid() == getpid()` is the standard "am I the main thread?" test,
+// and with both pinned to 1 every thread answered yes.
+//
+// The main thread still returns 1 so that test stays true where it should be;
+// every other thread gets a stable id folded out of its TLS block address,
+// which is unique per thread, needs no allocation and no lock.
+static pid_t stub_gettid(void) {
+    if (threadGetCurHandle() == envGetMainThreadHandle()) return 1;
+    uintptr_t t = (uintptr_t)armGetTls();
+    return (pid_t)(((t >> 8) & 0x3FFFFF) + 1000);
+}
 
 // ─── getpid / getuid / getgid ────────────────────────────────────────────────
 // newlib has getpid() but shimming it makes it available to the game's .so
