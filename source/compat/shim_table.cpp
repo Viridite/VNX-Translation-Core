@@ -419,6 +419,7 @@ bool shimHeapCheck(char* why, size_t whysz) {
 
     const NlChunk* c = (const NlChunk*)((char*)g_heap_anchor - 16);
     size_t prev_sz = 0;
+    const NlChunk* prev_c = nullptr;
     for (int i = 0; i < 400000; i++) {
         if (!memIsHeap(c)) return true;             // walked out of the arena: done
         if ((uintptr_t)c + 32 > arena_end) return true;   // reached the break
@@ -431,11 +432,13 @@ bool shimHeapCheck(char* why, size_t whysz) {
         // null forward pointer, which is the fault we keep seeing.
         if (i > 0 && !(c->size & NL_PREV_INUSE) && c->prev_size != prev_sz) {
             snprintf(why, whysz,
-                     "chunk %p: PREV_INUSE clear but prev_size %zu != previous "
-                     "chunk's size %zu — the block before it was overrun",
-                     (const void*)c, (size_t)c->prev_size, prev_sz);
+                     "chunk %p (step %d): PREV_INUSE clear but prev_size %zu != "
+                     "previous chunk's size %zu — prev was %p",
+                     (const void*)c, i, (size_t)c->prev_size, prev_sz,
+                     (const void*)prev_c);
             return false;
         }
+        prev_c  = c;
         prev_sz = sz;
         // Size zero is the end of the arena, not damage. memIsHeap answers for
         // the whole reserved heap region, but newlib has only sbrk'd part of
@@ -474,10 +477,16 @@ bool shimHeapCheck(char* why, size_t whysz) {
         // at the unlink.
         if (!(next->size & NL_PREV_INUSE)) {
             if (!c->fd || !c->bk) {
+                // Report the neighbours too. Once one size is misread every
+                // later "chunk" is user data reinterpreted as a header, and
+                // fd/bk full of small integers is exactly what that looks
+                // like — so a plausible predecessor means real corruption and
+                // an implausible one means the walk lost sync earlier.
                 snprintf(why, whysz,
-                         "free chunk %p (size %zu) has null bin pointers "
-                         "fd=%p bk=%p — freed memory was written to",
-                         (const void*)c, sz, (const void*)c->fd, (const void*)c->bk);
+                         "free chunk %p (size %zu) fd=%p bk=%p at step %d; "
+                         "prev %p size %zu",
+                         (const void*)c, sz, (const void*)c->fd, (const void*)c->bk,
+                         i, (const void*)prev_c, prev_sz);
                 return false;
             }
         }
