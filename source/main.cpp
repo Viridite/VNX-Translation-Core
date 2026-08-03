@@ -118,6 +118,15 @@ static void loaderThreadFn(void*) {
         progressCallback,
         g_loader_ctx->skip_install
     );
+    // Brain It On leaves "ELF: loading complete" as the very last line in the
+    // log. That call is four lines from the end of launchApk, so the only
+    // things between it and here are the result assignment, the return, and
+    // the destructors of launchApk's locals — a window small enough that
+    // knowing which SIDE of it we're on identifies the problem. If this line
+    // appears and the main thread still never proceeds, the hang is in the
+    // handoff; if it doesn't, launchApk never returned.
+    compatLog("loader: launchApk returned — signalling the main thread");
+    compatLogFlush();
     g_loader_ctx->done.store(true, std::memory_order_release);
 }
 
