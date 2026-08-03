@@ -18,6 +18,21 @@ extern void compatUiLog(const char* msg);
 extern void compatUiSetPct(int pct);
 
 // ─── Shared crash recovery ────────────────────────────────────────────────────
+// libnx's default exception stack is 0x400 — one kilobyte. Our handler runs on
+// it every single time a constructor faults, which for this game is 155 times
+// in a few seconds, and whatever it overruns lands in whichever .bss happens to
+// sit below it. That is a plausible source of damage to state we never touch
+// directly, and the symptom fits: the main thread stops at the moment of the
+// first fault, in a different draw call each run, and never recovers even after
+// the faults stop.
+//
+// Both symbols are weak in libnx precisely so applications can size this
+// themselves. 32KB costs nothing and removes the question.
+extern "C" {
+    alignas(16) u8 __nx_exception_stack[0x8000];
+    u64 __nx_exception_stack_size = sizeof(__nx_exception_stack);
+}
+
 jmp_buf           g_recover_jmp;
 volatile bool     g_in_recover  = false;
 volatile void*    g_recover_owner = nullptr;  // thread that armed the jmp_buf
@@ -161,12 +176,12 @@ static void logFaultBacktrace(void) {
     int found = 0;
     // 128 words is deep enough to clear _free_r's frame and reach whoever
     // called it, without wading into unrelated history further up.
-    for (uint64_t a = sp; a + 8 <= stack_end && a < sp + 128 * 8; a += 8) {
+    for (uint64_t a = sp; a + 8 <= stack_end && a < sp + 384 * 8; a += 8) {
         uint64_t w = *(const uint64_t*)a;
         if (!addrIsCode(w, where, sizeof(where))) continue;
         snprintf(line, sizeof(line), "ELF:     %p  %s", (void*)w, where);
         compatLog(line);
-        if (++found >= 8) break;
+        if (++found >= 14) break;
     }
     if (!found) compatLog("ELF:     (nothing on the stack resolved to code)");
 }
