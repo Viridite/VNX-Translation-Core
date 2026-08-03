@@ -85,6 +85,7 @@ void elfHeapCanaryCheck(const char* stage) {
 }
 
 static void logUnrecoveredFault(ThreadExceptionDump* ctx);
+void elfDescribePc(uint64_t pc, char* buf, size_t sz);   // defined below
 
 extern "C" void __libnx_exception_handler(ThreadExceptionDump* ctx) {
     uint32_t esr = ctx->esr;
@@ -268,9 +269,20 @@ void elfRunCtors(LoadedSo* so, ProgressCb cb) {
             char sym_buf[160];
             uint64_t fault_vaddr = g_recover_pc - (uint64_t)so->base;
             elfNearestSym(so, fault_vaddr, sym_buf, sizeof(sym_buf));
-            compatLogFmt("ELF: ctor[%zu/%zu] FAULT sig=%d esr=0x%08x pc=%p far=%p sym=%s — skipped",
+            // The PC is inside our own newlib (_free_r), so the question that
+            // matters is who called it — x30 at fault time answers that, and
+            // elfDescribePc resolves it against whichever module it lands in.
+            // Without this the caller is unknowable: the shim's free() logged
+            // nothing, so either it was bypassed or its checks passed, and the
+            // return address is what tells the two apart.
+            char lr_buf[192];
+            elfDescribePc(g_recover_lr, lr_buf, sizeof(lr_buf));
+            compatLogFmt("ELF: ctor[%zu/%zu] FAULT sig=%d esr=0x%08x pc=%p far=%p sym=%s "
+                         "lr=%p (%s) x0=%p x8=%p — skipped",
                          k + 1, n, g_recover_sig, g_recover_esr,
-                         (void*)g_recover_pc, (void*)g_recover_far, sym_buf);
+                         (void*)g_recover_pc, (void*)g_recover_far, sym_buf,
+                         (void*)g_recover_lr, lr_buf,
+                         (void*)g_recover_x0, (void*)g_recover_x8);
             // Dump surrounding instructions to diagnose root cause
             const uint32_t* insn = (const uint32_t*)(uintptr_t)g_recover_pc;
             compatLogFmt("ELF: INSN: [pc-12]=%08x [pc-8]=%08x [pc-4]=%08x [pc]=%08x [pc+4]=%08x",

@@ -251,6 +251,10 @@ void         installStatusClear(void);
 // line up in time.
 int          elfGetCtorFaultCount(void);
 
+// How many times the game has reached our free() shim. Read together with the
+// fault count: frees that fault without passing through here were bypassing it.
+unsigned long shimFreeCallCount(void);
+
 // Called by jni_env.cpp when the game signals its own loading/splash screen
 // is done (splashScreenHasCompleted). Hides the Viridite branding
 // overlay drawn over the game's loading screen (see loader.cpp).

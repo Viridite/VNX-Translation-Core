@@ -339,8 +339,15 @@ static bool looksLikeNewlibChunk(void* p) {
     if (freeWouldCorrupt(p)) return false;
     return true;
 }
+// Counted so the fault report can say whether the game's frees reach us at
+// all. Zero SKIP lines is ambiguous on its own: it means either every pointer
+// passed validation, or nothing ever came through here.
+volatile unsigned long g_sh_free_calls = 0;
+unsigned long shimFreeCallCount(void) { return g_sh_free_calls; }
+
 static void sh_free(void* p) {
     if (!p) return;
+    g_sh_free_calls++;
     if (!memIsHeap(p)) {
         static int warned = 0;
         if (warned < 20) {

@@ -158,9 +158,10 @@ static void watchdogThreadFn(void*) {
             // and the watchdog would die silently along with it.
             snprintf(buf, sizeof(buf),
                      "WATCHDOG: main thread has not advanced for %ds — "
-                     "wedged in '%s' (frame %llu, %d ctor faults so far)",
+                     "wedged in '%s' (frame %llu, %d ctor faults, %lu free-shim calls)",
                      (stuck + 1) * 2, g_main_phase.load(std::memory_order_relaxed),
-                     (unsigned long long)f, elfGetCtorFaultCount());
+                     (unsigned long long)f, elfGetCtorFaultCount(),
+                     shimFreeCallCount());
             compatLogRaw(buf);
             if (stuck == 0) probeAllocator();
             stuck++;
