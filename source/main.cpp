@@ -1178,8 +1178,26 @@ struct App {
         appletSetCpuBoostMode(ApmCpuBoostMode_FastLoad);
 
         Thread t;
+        // 8MB, not 1MB.
+        //
+        // This thread runs the game's static initialisers — 421 of them for
+        // Unity, which is not code written with a small stack in mind. Android
+        // gives the main thread 8MB and Unity is built against that
+        // expectation. On 1MB, a deep initialiser walks off the bottom of the
+        // stack and into whatever is mapped below it, and both symptoms we have
+        // follow from that one cause: the heap arena gets scribbled on, so
+        // _free_r faults unlinking a chunk whose neighbour is now garbage
+        // (155 times, always the same instruction), and SDL's own state is in
+        // the same heap, so the render thread wedges in its next texture
+        // allocation. It has never recovered, at any point, which is what
+        // corrupted state looks like rather than contention.
+        //
+        // The two have always moved together — the main thread stops within a
+        // second of the first constructor fault, across runs where that moment
+        // ranged from three seconds to eight — and nothing else explains both.
         threadCreate(&t, loaderThreadFn, nullptr, nullptr,
-                     0x100000 /*1MB stack*/, 0x2C, 1 /*CPU 1*/);
+                     0x800000 /*8MB stack — matches Android's main thread*/,
+                     0x2C, 1 /*CPU 1*/);
         threadStart(&t);
 
         Thread wd;
