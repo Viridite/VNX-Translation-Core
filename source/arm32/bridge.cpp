@@ -478,6 +478,12 @@ static bool dispatch(CpuState& c, const char* name, uint32_t& ret) {
     if (!strcmp(name,"rewind")) { FILE* f=gfile(arg(c,0)); if(f) rewind(f); ret=0; return true; }
     if (!strcmp(name,"feof"))   { FILE* f=gfile(arg(c,0)); ret = f?(uint32_t)feof(f):1; return true; }
     if (!strcmp(name,"fgetc"))  { FILE* f=gfile(arg(c,0)); ret = f?(uint32_t)fgetc(f):(uint32_t)-1; return true; }
+    // getc is fgetc by another name; the game reached it during constructors.
+    if (!strcmp(name,"getc"))   { FILE* f=gfile(arg(c,0)); ret = f?(uint32_t)fgetc(f):(uint32_t)-1; return true; }
+    if (!strcmp(name,"ungetc")) { FILE* f=gfile(arg(c,1)); ret = f?(uint32_t)ungetc((int)arg(c,0),f):(uint32_t)-1; return true; }
+    if (!strcmp(name,"fputc"))  { FILE* f=gfile(arg(c,1)); ret = f?(uint32_t)fputc((int)arg(c,0),f):(uint32_t)-1; return true; }
+    if (!strcmp(name,"fputs"))  { FILE* f=gfile(arg(c,1)); ret = (f&&arg(c,0))?(uint32_t)fputs(hstr(arg(c,0)),f):(uint32_t)-1; return true; }
+    if (!strcmp(name,"ferror")) { FILE* f=gfile(arg(c,0)); ret = f?(uint32_t)ferror(f):1; return true; }
     if (!strcmp(name,"fflush")) { FILE* f=gfile(arg(c,0)); if(f) fflush(f); ret=0; return true; }
 
     return false;

@@ -972,7 +972,16 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
                 result.is_arm32 = true;
                 result.game_so  = (void*)1;   // non-null: "there is a game to run"
             }
-            if (g_compat_log) { logFlushDedup(); fclose(g_compat_log); g_compat_log = nullptr; }
+            // Leave the log open when the game is about to run.
+            //
+            // This branch used to be terminal — it ran the game to completion
+            // and closed up — so it closed the log on the way out. Now that
+            // rendering happens afterwards on the main thread, closing here
+            // means every frame, every unimplemented instruction and every
+            // halt in the game itself is written to a file that is not there.
+            // The log ending at "load returned 0" was that, not the game
+            // stopping.
+            if (rc != 0 && g_compat_log) { logFlushDedup(); fclose(g_compat_log); g_compat_log = nullptr; }
             return result;
         }
         compatLog("No arm64 or armeabi-v7a .so found in APK");
