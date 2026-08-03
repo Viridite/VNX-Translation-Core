@@ -52,6 +52,11 @@ volatile uint64_t g_recover_x8  = 0;
 // it points into the heap is the whole question: a real chunk means the walk
 // is missing something, and a wild pointer means free() was handed rubbish.
 volatile uint64_t g_recover_x6  = 0;
+// _free_r stashes its mem argument at [sp+40] on entry (str x1,[sp,#40] at
+// +0x14) and never reuses that slot. Captured in the handler because the
+// logging below runs on frames that sit exactly where _free_r's was, so by
+// then it is gone.
+volatile uint64_t g_recover_freearg = 0;
 // Counted in the handler so the watchdog can print it next to the main
 // thread's phase — the two only mean something together. Kept a plain volatile
 // int rather than an atomic: this runs on libnx's shared exception stack, and
@@ -124,6 +129,9 @@ extern "C" void __libnx_exception_handler(ThreadExceptionDump* ctx) {
         g_recover_x6  = ctx->cpu_gprs[6].x;
         g_recover_fp  = ctx->fp.x;
         g_recover_sp  = ctx->sp.x;
+        g_recover_freearg = 0;
+        if (ctx->sp.x && (ctx->sp.x & 7) == 0)
+            g_recover_freearg = *(volatile uint64_t*)(ctx->sp.x + 40);
         g_ctor_faults++;
         longjmp(g_recover_jmp, 1);
     }
@@ -364,6 +372,24 @@ void elfRunCtors(LoadedSo* so, ProgressCb cb) {
             // return address is what tells the two apart.
             char lr_buf[192];
             elfDescribePc(g_recover_lr, lr_buf, sizeof(lr_buf));
+
+            // The block being freed. Between-constructor walks come back clean
+            // with full coverage, so the damage is made and consumed inside one
+            // constructor and only exists at this instant — this is the one
+            // moment it can be looked at.
+            char blk[220] = "";
+            uint64_t mem = g_recover_freearg;
+            if (mem && (mem & 15) == 0 && strcmp(shimAddrRegion(mem), "heap") == 0) {
+                const uint64_t* h = (const uint64_t*)(mem - 16);
+                uint64_t psz = h[0], szf = h[1];
+                snprintf(blk, sizeof(blk),
+                         " | freeing %p: prev_size=0x%llx size=0x%llx PREV_INUSE=%d",
+                         (void*)mem, (unsigned long long)psz,
+                         (unsigned long long)(szf & ~7ULL), (int)(szf & 1));
+            } else if (mem) {
+                snprintf(blk, sizeof(blk), " | freeing %p (%s)",
+                         (void*)mem, shimAddrRegion(mem));
+            }
             compatLogFmt("ELF: ctor[%zu/%zu] FAULT sig=%d esr=0x%08x pc=%p far=%p sym=%s "
                          "lr=%p (%s) x0=%p x6=%p(%s) x8=%p — skipped",
                          k + 1, n, g_recover_sig, g_recover_esr,
@@ -372,6 +398,7 @@ void elfRunCtors(LoadedSo* so, ProgressCb cb) {
                          (void*)g_recover_x0,
                          (void*)g_recover_x6, shimAddrRegion(g_recover_x6),
                          (void*)g_recover_x8);
+            if (blk[0]) compatLog(blk);
             // Only the first few: 155 identical faults would bury the log, and
             // they all come from the same place.
             if (g_ctor_faults <= 3) logFaultBacktrace();
