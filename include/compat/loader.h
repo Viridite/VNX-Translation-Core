@@ -280,6 +280,7 @@ void         loaderSetScreenOrient(int screen_orientation);
 // constructors is exercised; the constructors themselves are skipped, so this
 // tests the loader rather than the game.
 void         elfSetDryRun(bool on);
+bool         elfIsDryRun(void);
 // What the loader is executing right now — read by the integrity monitor so a
 // corruption report can name the constructor instead of a range of them.
 int          elfCurrentCtor(void);

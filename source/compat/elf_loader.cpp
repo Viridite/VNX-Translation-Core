@@ -292,6 +292,7 @@ const char* elfNearestSym(const LoadedSo* so, uint64_t vaddr, char* buf, size_t 
 // seconds without the game ever getting control.
 static bool g_dry_run = false;
 void elfSetDryRun(bool on) { g_dry_run = on; }
+bool elfIsDryRun(void)      { return g_dry_run; }
 
 void elfRunCtors(LoadedSo* so, ProgressCb cb) {
     if (g_dry_run) {

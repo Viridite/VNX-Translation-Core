@@ -921,6 +921,24 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
         if (!sos32.empty()) {
             const std::string& main32 = sos32.back().second;   // largest
             compatLogFmt("engine: no arm64 — ARM32 emulation layer for %s", main32.c_str());
+
+            // The dry run must stop here too. Constructors are skipped through
+            // elfRunCtors on the 64-bit path, but a 32-bit game runs inside the
+            // interpreter, which that flag never reaches — so without this a
+            // "deep test" of a 32-bit game would start it for real.
+            if (elfIsDryRun()) {
+                compatLogFmt("arm32: dry run — %zu libraries found, not executed", sos32.size());
+                for (auto& [sz, path] : sos32) {
+                    size_t sl = path.rfind('/');
+                    compatLogFmt("  arm32 lib: %s (%zu bytes)%s",
+                                 sl == std::string::npos ? path.c_str() : path.c_str() + sl + 1,
+                                 sz, a32::isElf32Arm(path.c_str()) ? "" : "  <-- NOT ELF32/ARM");
+                }
+                result.ok = true;
+                result.game_so = (void*)1;   // "loaded", for the caller's verdict
+                if (g_compat_log) { logFlushDedup(); fclose(g_compat_log); g_compat_log = nullptr; }
+                return result;
+            }
             compatAudioSetAssetsDir(asset_dir.c_str());
             int rc = a32::run(main32.c_str(), pkg_name.c_str());
             compatLogFmt("arm32: run returned %d", rc);
