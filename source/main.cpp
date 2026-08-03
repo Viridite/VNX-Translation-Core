@@ -124,6 +124,26 @@ static inline void mainPhase(const char* p) {
     g_main_phase.store(p, std::memory_order_relaxed);
 }
 
+// Every fault we have ever seen out of a game module landed in _free_r, and
+// newlib's malloc is shared by the game's code and by ours — SDL_ttf allocates
+// on every string it renders, which is most of what the draw block does. If a
+// game constructor corrupted the arena or left the allocator's lock held, the
+// main thread would block on its next allocation and never come back, while
+// the loader thread carried on to completion. That is exactly the shape of
+// this hang, so ask the allocator directly rather than keep inferring.
+//
+// If the "allocator responded" line never appears, malloc is the wedge.
+static void probeAllocator(void) {
+    compatLogRaw("WATCHDOG: probing the allocator — if no line follows this, malloc is wedged");
+    void* p = malloc(64);
+    if (!p) {
+        compatLogRaw("WATCHDOG: allocator responded but returned NULL — out of memory");
+        return;
+    }
+    free(p);
+    compatLogRaw("WATCHDOG: allocator responded normally — malloc is NOT the wedge");
+}
+
 static void watchdogThreadFn(void*) {
     uint64_t last = ~0ull;
     int      stuck = 0;
@@ -142,6 +162,7 @@ static void watchdogThreadFn(void*) {
                      (stuck + 1) * 2, g_main_phase.load(std::memory_order_relaxed),
                      (unsigned long long)f);
             compatLogRaw(buf);
+            if (stuck == 0) probeAllocator();
             stuck++;
         } else {
             stuck = 0;
@@ -924,16 +945,19 @@ struct App {
         }
         Uint32 elapsed_s = (now - s_stage_t) / 1000;
 
+        mainPhase("draw/backdrop");
         // ── Backdrop ──
         if (bootBgTex) SDL_RenderCopy(rdr, bootBgTex, nullptr, nullptr);
         else           fill(0, 0, SW, SH, C_BG);
 
+        mainPhase("draw/rings");
         // ── Counter-rotating rings (ringSpin 6s linear) ──
         float spin = (now % 6000) / 6000.0f * 360.0f;
         SDL_Rect ringDst = {SW / 2 - RING_TEX / 2, GEM_CY - RING_TEX / 2, RING_TEX, RING_TEX};
         if (ringOutTex) SDL_RenderCopyEx(rdr, ringOutTex, nullptr, &ringDst,  spin, nullptr, SDL_FLIP_NONE);
         if (ringInTex)  SDL_RenderCopyEx(rdr, ringInTex,  nullptr, &ringDst, -spin, nullptr, SDL_FLIP_NONE);
 
+        mainPhase("draw/sparkles");
         // ── Sparkles (0%/100% hidden, 50% full) ──
         struct Spark { int cx, cy, r; SDL_Color c; float period, delay; };
         static const Spark SPARKS[] = {
@@ -967,6 +991,7 @@ struct App {
         }
 
         if (gemTex && gemFrame && gemAlpha > 0.01f) {
+            mainPhase("draw/gemRenderTarget");
             SDL_Texture* prev = SDL_GetRenderTarget(rdr);
             SDL_SetRenderTarget(rdr, gemFrame);
             SDL_SetRenderDrawColor(rdr, 0, 0, 0, 0);
@@ -985,12 +1010,14 @@ struct App {
             SDL_SetTextureAlphaMod(gemFrame, 255);
         }
 
+        mainPhase("draw/breakFlash");
         // Flash at the break, then the game icon bursts in and holds.
         if (haveIcon && cyc >= 0.52f && cyc < 0.63f) {
             float t = (cyc - 0.52f) / 0.11f, a = t < 0.3f ? t / 0.3f : (1.0f - t) / 0.7f;
             fillCircle(SW / 2, GEM_CY, (int)(150 * (0.7f + t)), {255, 255, 255, (Uint8)(190 * a)});
         }
         if (haveIcon && cyc >= 0.51f) {
+            mainPhase("draw/gameIcon");
             float scale, alpha;
             if      (cyc < 0.56f) { float u=(cyc-0.51f)/0.05f; scale=0.55f+0.17f*u; alpha=u; }
             else if (cyc < 0.66f) { float u=(cyc-0.56f)/0.10f; scale=0.72f+0.32f*u; alpha=1.0f; }
@@ -1006,11 +1033,13 @@ struct App {
             SDL_SetTextureAlphaMod(gameIconTex, 255);
         }
 
+        mainPhase("draw/caption");
         // ── Caption: game title over stage text + blinking dots ──
         drawTrackedCentered(fBootT,
                             launchTitle.empty() ? "NOW LOADING" : upperAscii(launchTitle),
                             bootTitle(), SW / 2, TITLE_Y, 6);
 
+        mainPhase("draw/stageText");
         std::string status = g_ui_stage[0] ? upperAscii(g_ui_stage) : "READING GAME DATA";
         if (elapsed_s >= 30) status += " — STILL WORKING";
         const SDL_Color statCol = {0, 102, 51, 140};
@@ -1027,6 +1056,7 @@ struct App {
 
         // ── Progress bar (280×3) — real percentage when the loader reports one,
         //    otherwise the design's indeterminate slider.
+        mainPhase("draw/progressBar");
         const int BW = 280, BX = SW / 2 - BW / 2;
         const SDL_Color BAR_A = {0, 200, 83, 255}, BAR_B = {0, 117, 63, 255};
         fill(BX, BAR_Y, BW, 3, {0, 168, 84, 38});
@@ -1043,6 +1073,7 @@ struct App {
                 fill(i, BAR_Y, 1, 3, lerpCol(BAR_A, BAR_B, (i - x0) / (float)SLW));
         }
 
+        mainPhase("draw/footer");
         // ── Footer wordmark ──
         drawTrackedCentered(fBootF, "VIRIDITE", {0, 102, 51, 77}, SW / 2, SH - 48, 3);
 
