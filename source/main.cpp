@@ -1179,6 +1179,42 @@ struct App {
         appletSetCpuBoostMode(ApmCpuBoostMode_FastLoad);
 
         Thread t;
+        // Pre-render every glyph the loading screen can draw, before the
+        // loader thread starts.
+        //
+        // The main thread wedges because it allocates: SDL_ttf mallocs for any
+        // glyph it has not cached, and once the game's constructors have upset
+        // the allocator that allocation never returns. The glyph cache removed
+        // most of them, but the first sighting of each character still
+        // allocates, and the stage text gains new characters as loading
+        // proceeds — at exactly the wrong moment.
+        //
+        // Warming the cache here means no allocations on the render path for
+        // the whole of loading, so a damaged allocator cannot take down the
+        // part of the process that was still working. It does not repair the
+        // damage; it stops the damage spreading.
+        {
+            static const char* kWarm =
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                "0123456789 .,:;!?'()[[]{}<>/|-_+=*&^%$#@";
+            TTF_Font* fonts[] = { fBootT, fBootS, fBootF, fSm };
+            const SDL_Color cols[] = { bootTitle(), {0, 102, 51, 140},
+                                       {0, 102, 51, 77}, C_GRAY };
+            int warmed = 0;
+            for (size_t fi = 0; fi < sizeof(fonts)/sizeof(fonts[0]); fi++) {
+                if (!fonts[fi]) continue;
+                for (const char* c = kWarm; *c; c++) {
+                    char g[2] = { *c, 0 };
+                    // Drawn off-screen: what matters is the texture left in the
+                    // cache, not the pixels.
+                    drawText(fonts[fi], g, cols[fi], -1000, -1000);
+                    warmed++;
+                }
+            }
+            compatLogFmt("ui: pre-rendered %d glyphs — the loading screen will "
+                         "not allocate again", warmed);
+        }
+
         // 8MB, not 1MB.
         //
         // This thread runs the game's static initialisers — 421 of them for
@@ -1604,8 +1640,14 @@ int main(int argc, char** argv) {
         }
         if (out) fclose(out);
 
-        envSetNextLoad("sdmc:/switch/Viridite.nro", "sdmc:/switch/Viridite.nro --selftest-results");
-        logMsg("core-x64: dry run done, returning to launcher");
+        // hbmenu reported an error on the way back, and nothing in our code
+        // prints that — so the hand-back itself was refused. Log the result
+        // rather than assume it took.
+        Result rcNext = envSetNextLoad("sdmc:/switch/Viridite.nro",
+                                       "sdmc:/switch/Viridite.nro --selftest-results");
+        char nb[96];
+        snprintf(nb, sizeof(nb), "core-x64: dry run done, envSetNextLoad rc=0x%x", rcNext);
+        logMsg(nb);
         app.cleanup();
         return 0;
     }

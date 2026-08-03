@@ -483,6 +483,36 @@ bool shimHeapCheck(char* why, size_t whysz) {
             g_walk_stop = "arena top invalid";
             return false;
         }
+        // Being in range is not enough, and that is exactly why this check has
+        // never fired. At the fault, top IS in range — 355MB into a 512MB
+        // arena — it just points at memory that is entirely zero. sysmalloc
+        // then frees chunk2mem(top), reads a null forward pointer out of those
+        // zeros, and stores through it.
+        //
+        // A real top chunk has a size, and that size reaches the end of the
+        // arena: it is by definition the last chunk. Checking the size is what
+        // catches "top points at nothing", which is the actual failure.
+        if (base && top) {
+            const NlChunk* tc  = (const NlChunk*)top;
+            const size_t   tsz = nlSize(tc);
+            if (tsz == 0) {
+                snprintf(why, whysz,
+                         "malloc arena top=%p has size 0 — it points at zeroed "
+                         "memory, so the next allocation will free a chunk that "
+                         "is not there (av_ at %p, arena ends %p)",
+                         (void*)top, (void*)__malloc_av_, (void*)arena_end);
+                g_walk_stop = "arena top has no size";
+                return false;
+            }
+            if (top + tsz > arena_end + 0x1000) {
+                snprintf(why, whysz,
+                         "malloc arena top=%p size %zu runs past the arena end "
+                         "%p (av_ at %p)",
+                         (void*)top, tsz, (void*)arena_end, (void*)__malloc_av_);
+                g_walk_stop = "arena top oversized";
+                return false;
+            }
+        }
     }
     // A break of 0 or -1 would make every bound below trivially true and turn
     // the whole walk into an immediate "clean" — say so rather than pretend.
