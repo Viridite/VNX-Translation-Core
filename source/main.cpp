@@ -1489,8 +1489,17 @@ struct App {
             // The reveal, with the jingle. Its length follows the audio so the
             // two land together; if audio could not open, the default stands
             // and it simply plays silently.
+            // Breadcrumbs. Everything from here to the game's first frame is
+            // new, and a hard fault in it leaves no other trace — the logs
+            // simply stop. Each stage announces itself so the last line written
+            // names the one that failed.
+            compatLog("boot: rendering jingle");
+            compatLogFlush();
             if (jingle::play() && jingle::length() > 0.5f)
                 revealSecs = jingle::length();
+            compatLogFmt("boot: reveal starting (%.2fs)", revealSecs);
+            compatLogFlush();
+
             revealStart = SDL_GetTicks();
             while (revealT() < 1.0f) {
                 SDL_Event ev; while (SDL_PollEvent(&ev)) {}
@@ -1500,6 +1509,8 @@ struct App {
             revealStart = 0;
             jingle::stop();
             bootFadeBegin(0.75f);
+            compatLog("boot: reveal done — handing the screen to the game");
+            compatLogFlush();
 
             std::string base_dir = std::string("sdmc:/Viridite/games/") + pkg;
             compatLog("loader: handing off to the game on the main thread");

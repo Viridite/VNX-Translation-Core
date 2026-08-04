@@ -12,7 +12,7 @@
 namespace {
 
 constexpr int    kRate = 48000;
-constexpr double kTail = 1.6;          // seconds of decay allowed past the last note off
+constexpr double kTail = 1.0;          // seconds of decay allowed past the last note off
 
 struct Note { double t, dur; int pitch, vel, prog; };
 
@@ -241,7 +241,27 @@ bool play(void) {
     }
 
     const size_t frames = (size_t)(total * kRate) + 1;
-    std::vector<float> mixL(frames, 0.0f), mixR(frames, 0.0f);
+
+    // One interleaved float buffer rather than two mixes plus a separate
+    // conversion pass — a third of the peak memory. This runs at the exact
+    // moment the guest heap and the game's textures are both live, so a
+    // transient couple of megabytes here is not free.
+    //
+    // calloc, not std::vector, and the result is checked. The Core is built
+    // with -fno-exceptions, so a container that cannot get its memory does not
+    // throw something catchable — it calls std::terminate, and the console
+    // shows "The software has closed because an error occurred" with nothing
+    // in the log. An allocation this size, made at the tightest moment of the
+    // whole run, must be allowed to fail quietly.
+    float* mix = (float*)calloc(frames * 2, sizeof(float));
+    if (!mix) {
+        compatLogFmt("jingle: could not allocate %zu KB to render — booting silently",
+                     (frames * 2 * sizeof(float)) / 1024);
+        SDL_CloseAudioDevice(g_dev);
+        SDL_QuitSubSystem(SDL_INIT_AUDIO);
+        g_dev = 0;
+        return false;
+    }
 
     for (const Note& n : notes) {
         const Voice  v    = voiceFor(n.prog);
@@ -269,8 +289,8 @@ bool play(void) {
             }
             if (v.attack > 0.0f) s *= 1.0f - expf(-t / v.attack);
             else                 s *= 1.0f - expf(-t / 0.004f);   // soften the click
-            mixL[i] += s * gl;
-            mixR[i] += s * gr;
+            mix[i * 2 + 0] += s * gl;
+            mix[i * 2 + 1] += s * gr;
         }
     }
 
@@ -278,19 +298,21 @@ bool play(void) {
     const size_t fade = (size_t)(0.25 * kRate);
     for (size_t i = 0; i < fade && i < frames; i++) {
         const float g = (float)i / fade;
-        mixL[frames - 1 - i] *= g;
-        mixR[frames - 1 - i] *= g;
+        mix[(frames - 1 - i) * 2 + 0] *= g;
+        mix[(frames - 1 - i) * 2 + 1] *= g;
     }
 
-    std::vector<int16_t> pcm(frames * 2);
-    for (size_t i = 0; i < frames; i++) {
+    // In place: the float samples are consumed strictly before the int16 that
+    // replaces them, so no second buffer is needed.
+    int16_t* pcm = reinterpret_cast<int16_t*>(mix);
+    for (size_t i = 0; i < frames * 2; i++) {
         // tanh rather than a hard clip: the arpeggio piles up six partials per
         // note and four notes deep, and a clip there is audible as a buzz.
-        pcm[i * 2 + 0] = (int16_t)(tanhf(mixL[i]) * 30000.0f);
-        pcm[i * 2 + 1] = (int16_t)(tanhf(mixR[i]) * 30000.0f);
+        pcm[i] = (int16_t)(tanhf(mix[i]) * 30000.0f);
     }
 
-    SDL_QueueAudio(g_dev, pcm.data(), (uint32_t)(pcm.size() * sizeof(int16_t)));
+    SDL_QueueAudio(g_dev, pcm, (uint32_t)(frames * 2 * sizeof(int16_t)));
+    free(mix);                            // SDL_QueueAudio copies into its own queue
     SDL_PauseAudioDevice(g_dev, 0);
 
     g_len    = (float)total;

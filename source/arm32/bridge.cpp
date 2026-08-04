@@ -255,6 +255,13 @@ static size_t gvformat(char* out, size_t cap, uint32_t gfmt, GuestVa& va) {
 }
 
 static inline char*  hstr(uint32_t g) { return g ? (char*)toHost(g) : nullptr; }
+// Same, but safe to hand a pointer the guest chose. hstr() only rejects null,
+// so anything outside the region — a wild pointer, or a value that was never
+// a pointer — resolved to host memory beyond the mapping and read it. Used
+// wherever a string comes from the game rather than from us.
+static inline const char* gstr(uint32_t g, const char* fallback = "(bad ptr)") {
+    return (g && g < g_region) ? (const char*)toHost(g) : fallback;
+}
 static inline void*  hptr(uint32_t g) { return g ? (void*)toHost(g) : nullptr; }
 
 // strlen bounded to the region — never scans past the guest window.
@@ -596,7 +603,8 @@ static bool dispatchMore(CpuState& c, const char* name, uint32_t& ret) {
         return true;
     }
     if (!strcmp(name,"__assert2")) {
-        compatLogFmt("arm32: assert %s:%u %s", A(0)?hstr(A(0)):"?", A(1), A(3)?hstr(A(3)):"?");
+        compatLogFmt("arm32: assert %s:%u %s — %s", gstr(A(0), "?"), A(1),
+                     gstr(A(2), "?"), gstr(A(3), "(no message)"));
         c.halt = true; c.halt_pc = c.r[15];
         return true;
     }
@@ -816,11 +824,11 @@ static bool dispatch(CpuState& c, const char* name, uint32_t& ret) {
         if (!strcmp(name,"__android_log_print") || !strcmp(name,"__android_log_vprint")) {
             GuestVa va; if (is_v) va.p = arg(c, 3); else { va.c = &c; va.i = 3; }
             int n = fmtInto(arg(c, 2), va);
-            compatLogFmt("game[%s]: %s", arg(c, 1) ? hstr(arg(c, 1)) : "?", fbuf);
+            compatLogFmt("game[%s]: %s", gstr(arg(c, 1), "?"), fbuf);
             ret = (uint32_t)n; return true;
         }
         if (!strcmp(name,"__android_log_write") || !strcmp(name,"__android_log_assert")) {
-            compatLogFmt("game[%s]: %s", arg(c, 1) ? hstr(arg(c, 1)) : "?", arg(c, 2) ? hstr(arg(c, 2)) : "");
+            compatLogFmt("game[%s]: %s", gstr(arg(c, 1), "?"), gstr(arg(c, 2), ""));
             ret = 0; return true;
         }
     }

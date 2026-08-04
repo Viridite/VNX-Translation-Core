@@ -817,8 +817,12 @@ void a32::a32FrameSwap(void) {
     // on globals that only the 64-bit path fills in.
     EGLDisplay d = eglGetCurrentDisplay();
     EGLSurface s = eglGetCurrentSurface(EGL_DRAW);
+    if (d == EGL_NO_DISPLAY || s == EGL_NO_SURFACE) return;
+    // Only once a context is known to be current. GL entry points resolve
+    // through a per-context dispatch table, so calling one with nothing bound
+    // is not a no-op — it is a null dereference, and this runs on every frame.
     bootFadeDraw();                       // the tail of the Viridite reveal
-    if (d != EGL_NO_DISPLAY && s != EGL_NO_SURFACE) eglSwapBuffers(d, s);
+    eglSwapBuffers(d, s);
 }
 
 // ─── launchApk ───────────────────────────────────────────────────────────────
