@@ -1,4 +1,5 @@
 #include "compat/loader.h"
+#include "compat/bootfade.h"
 #include "compat/orientation.h"
 
 // android:screenOrientation for the game being launched. Set by the caller
@@ -816,6 +817,7 @@ void a32::a32FrameSwap(void) {
     // on globals that only the 64-bit path fills in.
     EGLDisplay d = eglGetCurrentDisplay();
     EGLSurface s = eglGetCurrentSurface(EGL_DRAW);
+    bootFadeDraw();                       // the tail of the Viridite reveal
     if (d != EGL_NO_DISPLAY && s != EGL_NO_SURFACE) eglSwapBuffers(d, s);
 }
 
@@ -2053,6 +2055,7 @@ void runGameOnMainThread(void* game_so_ptr,
                 // and embedded in the README — nothing left to gain from
                 // paying this cost on every future test run.
 
+                bootFadeDraw();       // the tail of the Viridite reveal
                 // Swap buffers (Cocos2d-x doesn't call eglSwapBuffers itself)
                 if (g_egl_display != EGL_NO_DISPLAY && g_egl_surface != EGL_NO_SURFACE)
                     eglSwapBuffers(g_egl_display, g_egl_surface);

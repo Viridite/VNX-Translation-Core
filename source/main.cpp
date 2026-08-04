@@ -16,6 +16,8 @@
 
 #include "apk.h"
 #include "compat/loader.h"
+#include "compat/jingle.h"
+#include "compat/bootfade.h"
 #include "arm32/arm32.h"
 #include "build_number.h"
 #include "avatar.h"
@@ -967,6 +969,27 @@ struct App {
         dst[i] = '\0';
     }
 
+    // ── The reveal ──────────────────────────────────────────────────────────
+    //
+    // While loading, the gem animation runs on a 4.8s loop and the progress bar
+    // reports where the work is. Once the game is actually ready, the same
+    // animation is driven once, deliberately, against the jingle: the gem
+    // pulses, breaks, the game's own icon bursts through, and the screen goes
+    // to black — from which the game itself fades up.
+    //
+    // Reusing the loop's timeline rather than writing a second animation means
+    // the reveal is the thing the player has been watching all along, finally
+    // completing, instead of a different screen appearing at the end.
+    Uint32 revealStart = 0;                // 0 = still loading
+    float  revealSecs  = 3.1f;
+
+    bool revealing(void) const { return revealStart != 0; }
+    float revealT(void) const {              // 0..1 across the whole reveal
+        if (!revealStart) return 0.0f;
+        float t = (SDL_GetTicks() - revealStart) / 1000.0f / revealSecs;
+        return t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+    }
+
     // Layout, transcribed from the design's centred flex column.
     static constexpr int GEM_PX   = 240;   // gem render size
     static constexpr int RING_TEX = 340;   // ring texture (340×340 box)
@@ -1079,7 +1102,11 @@ struct App {
         // keeps the gentle float. One 4.8s cycle.
         const bool haveIcon = (gameIconTex != nullptr);
         float lift = 0.0f, gemScale = 1.0f, gemAlpha = 1.0f;
-        float cyc = (now % 4800) / 4800.0f;
+        // During the reveal the cycle is played once from just before the break,
+        // so the pulse-break-burst runs to time with the jingle rather than
+        // wherever the loop happened to be when loading finished.
+        float cyc = revealing() ? (0.34f + 0.63f * revealT())
+                                : (now % 4800) / 4800.0f;
         if (!haveIcon) {
             float fk = 0.5f - 0.5f * cosf(((now % 3400) / 3400.0f) * 2.0f * PI_F);
             lift = -14.0f * fk; gemScale = 1.0f + 0.015f * fk;
@@ -1171,25 +1198,40 @@ struct App {
         // ── Progress bar (280×3) — real percentage when the loader reports one,
         //    otherwise the design's indeterminate slider.
         mainPhase("draw/progressBar");
-        const int BW = 280, BX = SW / 2 - BW / 2;
-        const SDL_Color BAR_A = {0, 200, 83, 255}, BAR_B = {0, 117, 63, 255};
-        fill(BX, BAR_Y, BW, 3, {0, 168, 84, 38});
-        if (g_ui_pct > 0) {
-            int pct = g_ui_pct > 100 ? 100 : g_ui_pct;
-            int fw  = BW * pct / 100;
-            for (int i = 0; i < fw; i++)
-                fill(BX + i, BAR_Y, 1, 3, lerpCol(BAR_A, BAR_B, i / (float)BW));
-        } else {
-            const int SLW = (int)(BW * 0.35f);
-            int sx = (int)((now % 1600) / 1600.0f * (BW + SLW)) - SLW;
-            int x0 = std::max(BX, BX + sx), x1 = std::min(BX + BW, BX + sx + SLW);
-            for (int i = x0; i < x1; i++)
-                fill(i, BAR_Y, 1, 3, lerpCol(BAR_A, BAR_B, (i - x0) / (float)SLW));
+        // Hidden during the reveal: the work is finished, so a bar reporting on
+        // it is the one element on screen still claiming otherwise.
+        if (!revealing()) {
+            const int BW = 280, BX = SW / 2 - BW / 2;
+            const SDL_Color BAR_A = {0, 200, 83, 255}, BAR_B = {0, 117, 63, 255};
+            fill(BX, BAR_Y, BW, 3, {0, 168, 84, 38});
+            if (g_ui_pct > 0) {
+                int pct = g_ui_pct > 100 ? 100 : g_ui_pct;
+                int fw  = BW * pct / 100;
+                for (int i = 0; i < fw; i++)
+                    fill(BX + i, BAR_Y, 1, 3, lerpCol(BAR_A, BAR_B, i / (float)BW));
+            } else {
+                const int SLW = (int)(BW * 0.35f);
+                int sx = (int)((now % 1600) / 1600.0f * (BW + SLW)) - SLW;
+                int x0 = std::max(BX, BX + sx), x1 = std::min(BX + BW, BX + sx + SLW);
+                for (int i = x0; i < x1; i++)
+                    fill(i, BAR_Y, 1, 3, lerpCol(BAR_A, BAR_B, (i - x0) / (float)SLW));
+            }
         }
 
         mainPhase("draw/footer");
         // ── Footer wordmark ──
         drawTrackedCentered(fBootF, "VIRIDITE", {0, 102, 51, 77}, SW / 2, SH - 48, 3);
+
+        // The last fifth of the reveal dips to black, and bootFadeDraw() picks
+        // the picture back up over the game's first frames — so the two screens
+        // are joined by one continuous fade rather than a cut.
+        if (revealing()) {
+            const float t = revealT();
+            if (t > 0.80f) {
+                const float k = (t - 0.80f) / 0.20f;
+                fill(0, 0, SW, SH, {0, 0, 0, (Uint8)(255.0f * k * k)});
+            }
+        }
 
         if (showLogPanel) { mainPhase("showProgress/logPanel"); drawLogPanel(); }
 
@@ -1444,6 +1486,21 @@ struct App {
         // thread (SDL2's EGL context is current on this thread, so GL calls reach
         // the screen).
         if (!quitting && ctx.result.game_so) {
+            // The reveal, with the jingle. Its length follows the audio so the
+            // two land together; if audio could not open, the default stands
+            // and it simply plays silently.
+            if (jingle::play() && jingle::length() > 0.5f)
+                revealSecs = jingle::length();
+            revealStart = SDL_GetTicks();
+            while (revealT() < 1.0f) {
+                SDL_Event ev; while (SDL_PollEvent(&ev)) {}
+                showProgress();
+                SDL_Delay(16);
+            }
+            revealStart = 0;
+            jingle::stop();
+            bootFadeBegin(0.75f);
+
             std::string base_dir = std::string("sdmc:/Viridite/games/") + pkg;
             compatLog("loader: handing off to the game on the main thread");
             compatLogFlush();
