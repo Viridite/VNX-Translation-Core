@@ -419,6 +419,65 @@ static void execNeonLdSt(CpuState& c, uint32_t insn, uint32_t pc) {
     else               c.r[rn] = addr + c.r[rm];
 }
 
+// Advanced SIMD "one register and a modified immediate" — VMOV/VMVN/VORR/VBIC
+// with an inline constant. An 8-bit field plus a 4-bit `cmode` expands to a
+// 64-bit pattern; cmode picks which byte lane the value lands in, and its low
+// bit (below 1100) switches the whole thing from a move to a bitwise merge.
+//
+// Zeroing a vector is by far the most common use, and it is how the game
+// initialises the objects its constructors build — so leaving it unimplemented
+// stopped a constructor cold rather than degrading anything gracefully.
+//
+// Returns false only for the one encoding the architecture leaves undefined.
+static bool neonExpandImm(uint32_t insn, uint64_t& imm64, int& op_kind) {
+    const uint32_t cmode = (insn >> 8) & 0xF;
+    const uint32_t op    = (insn >> 5) & 1;
+    const uint32_t imm8  = (((insn >> 24) & 1) << 7) |      // i
+                           (((insn >> 16) & 7) << 4) |      // imm3
+                           ( insn         & 0xF);           // imm4
+
+    auto rep32 = [](uint32_t v) -> uint64_t { return (uint64_t)v | ((uint64_t)v << 32); };
+    auto rep16 = [](uint16_t v) -> uint64_t { uint64_t x = v; x |= x << 16; x |= x << 32; return x; };
+
+    op_kind = 0;                                   // 0 = replace, 1 = OR, 2 = AND NOT
+    const uint32_t sel = cmode >> 1;
+    switch (sel) {
+        case 0: imm64 = rep32(imm8); break;
+        case 1: imm64 = rep32((uint32_t)imm8 << 8); break;
+        case 2: imm64 = rep32((uint32_t)imm8 << 16); break;
+        case 3: imm64 = rep32((uint32_t)imm8 << 24); break;
+        case 4: imm64 = rep16((uint16_t)imm8); break;
+        case 5: imm64 = rep16((uint16_t)(imm8 << 8)); break;
+        case 6: imm64 = (cmode & 1) ? rep32(((uint32_t)imm8 << 16) | 0xFFFFu)
+                                    : rep32(((uint32_t)imm8 << 8)  | 0xFFu);
+                break;
+        default:                                   // cmode 111x
+            if (!(cmode & 1)) {
+                if (!op) { uint64_t b = imm8; b |= b << 8; b |= b << 16; b |= b << 32; imm64 = b; }
+                else {                             // VMOV.I64 — one byte per set bit
+                    uint64_t v = 0;
+                    for (int b = 0; b < 8; b++) if (imm8 & (1u << b)) v |= 0xFFull << (b * 8);
+                    imm64 = v;
+                }
+                return true;
+            }
+            if (op) return false;                  // cmode 1111 with op 1 is undefined
+            {                                      // VMOV.F32 — a VFP expanded immediate
+                const uint32_t f = ((uint32_t)(imm8 >> 7) << 31)          |
+                                   ((uint32_t)(((imm8 >> 6) & 1) ^ 1) << 30) |
+                                   (((imm8 >> 6) & 1) ? 0x3E000000u : 0u)  |
+                                   ((uint32_t)(imm8 & 0x3F) << 19);
+                imm64 = rep32(f);
+            }
+            return true;
+    }
+    // Below cmode 1100 the low bit selects the bitwise forms; at 110x it only
+    // chose the immediate, so those stay a move.
+    if (sel <= 5 && (cmode & 1)) op_kind = op ? 2 : 1;      // VBIC : VORR
+    else if (op)                 imm64 = ~imm64;            // VMVN
+    return true;
+}
+
 // ── ARM (32-bit) step ───────────────────────────────────────────────────────
 static void stepArm(CpuState& c) {
     g_it_suppress = false;              // ARM has no IT; flags behave normally
@@ -456,9 +515,27 @@ static void stepArm(CpuState& c) {
     // load/store decoders, where it would quietly do something plausible and
     // wrong rather than fail.
     if ((insn & 0xFF100000) == 0xF4000000) { execNeonLdSt(c, insn, pc); return; }
+    if ((insn & 0xFEB80090) == 0xF2800010) {     // one register, modified immediate
+        uint64_t imm; int kind;
+        if (!neonExpandImm(insn, imm, kind)) {
+            if (cpuNoteUnimpl(insn))
+                compatLogFmt("arm32: undefined NEON immediate insn=0x%08x pc=0x%x", insn, pc);
+            c.halt = true; c.halt_pc = pc;
+            return;
+        }
+        const uint32_t d = (((insn >> 22) & 1) << 4) | ((insn >> 12) & 0xF);
+        const uint32_t n = ((insn >> 6) & 1) ? 2u : 1u;      // Q selects a pair
+        for (uint32_t k = 0; k < n; k++) {
+            uint64_t& reg = c.vfp[(d + k) & 31];
+            if      (kind == 1) reg |=  imm;
+            else if (kind == 2) reg &= ~imm;
+            else                reg  =  imm;
+        }
+        return;
+    }
     if ((insn & 0xFE000000) == 0xF2000000) {
-        // SIMD data processing. Not implemented — but halting names it, where
-        // falling through would have executed it as an AND/ADD on core
+        // The rest of SIMD data processing. Not implemented — but halting names
+        // it, where falling through would have executed it as an AND/ADD on core
         // registers and carried on with corrupted state.
         if (cpuNoteUnimpl(insn))
             compatLogFmt("arm32: UNIMPL NEON data-proc insn=0x%08x pc=0x%x", insn, pc);

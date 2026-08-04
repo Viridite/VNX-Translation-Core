@@ -122,6 +122,138 @@ static inline float fArg(CpuState& c, int i) {
     uint32_t raw = arg(c, i);
     float f; memcpy(&f, &raw, sizeof f); return f;
 }
+// ── printf for guest code ───────────────────────────────────────────────────
+//
+// Nothing in the printf family was bridged, which mattered more than the call
+// count suggested: libc++abi formats its assertion text through vasprintf
+// before aborting, so every failed assert reached abort() with its message
+// thrown away. The log recorded that the game had given up but never why.
+//
+// Arguments come from a guest va_list, which on ARM EABI is a plain pointer
+// into the caller's stack: 32-bit values occupy one slot, 64-bit values are
+// aligned to 8 first. Rather than reimplement formatting, each conversion is
+// re-emitted as a host format string and handed to snprintf with the one
+// argument it consumes — so width, precision, flags and `*` all behave
+// exactly as the guest expects without a second implementation to keep
+// correct.
+static uint32_t gStrlen(uint32_t g);
+
+struct GuestVa {
+    // Exactly one of these is used. A v-form (vfprintf, vasprintf) is handed a
+    // va_list, which is just a guest pointer. A plain variadic call instead
+    // spills its arguments across r0-r3 and then the stack, which is what
+    // arg() already knows how to walk — so `c` selects that reading.
+    CpuState* c = nullptr;
+    int       i = 0;                             // argument word index, for `c`
+    uint32_t  p = 0;                             // guest va_list, otherwise
+
+    uint32_t u32(void) {
+        if (c) return arg(*c, i++);
+        if (!guestValid(p, 4)) return 0;
+        uint32_t v = *(const uint32_t*)toHost(p); p += 4; return v;
+    }
+    uint64_t u64(void) {
+        if (c) {
+            if (i & 1) i++;                      // 64-bit starts on an even word
+            uint32_t lo = arg(*c, i++), hi = arg(*c, i++);
+            return (uint64_t)lo | ((uint64_t)hi << 32);
+        }
+        p = (p + 7u) & ~7u;                      // 64-bit values are 8-aligned
+        if (!guestValid(p, 8)) return 0;
+        uint64_t v = *(const uint64_t*)toHost(p); p += 8; return v;
+    }
+};
+
+static size_t gvformat(char* out, size_t cap, uint32_t gfmt, GuestVa& va) {
+    if (!cap) return 0;
+    out[0] = 0;
+    if (!gfmt || gfmt >= g_region) return 0;
+
+    const char* f   = (const char*)toHost(gfmt);
+    const char* end = f + gStrlen(gfmt);
+    size_t      n   = 0;                          // bytes written (excl. NUL)
+
+    auto put = [&](const char* src, size_t len) {
+        if (n >= cap - 1) { n += len; return; }   // keep counting for the return
+        size_t room = cap - 1 - n;
+        size_t take = len < room ? len : room;
+        memcpy(out + n, src, take);
+        n += len;
+        out[n < cap - 1 ? n : cap - 1] = 0;
+    };
+
+    while (f < end) {
+        if (*f != '%') { put(f, 1); f++; continue; }
+        if (f + 1 < end && f[1] == '%') { put("%", 1); f += 2; continue; }
+
+        // Copy the conversion verbatim, resolving any `*` as we go, so the host
+        // sees the same spec the guest wrote.
+        char spec[64]; size_t sn = 0;
+        spec[sn++] = *f++;
+        int  star[2]; int stars = 0;
+        int  len = 0;                              // 0=int 1=long 2=long long 3=size_t/ptrdiff
+        while (f < end && sn < sizeof spec - 8) {
+            char ch = *f;
+            if (ch == '*') {
+                if (stars < 2) star[stars++] = (int)va.u32();
+                // splice the resolved number in place of the star
+                sn += (size_t)snprintf(spec + sn, sizeof spec - sn, "%d", star[stars - 1]);
+                f++;
+                continue;
+            }
+            if (ch == 'l') { len = (len == 1 || len == 2) ? 2 : 1; f++; continue; }  // l / ll
+            if (ch == 'h') { f++; continue; }                       // h/hh: still an int slot
+            if (ch == 'z' || ch == 't' || ch == 'j') { len = 3; f++; continue; }
+            if (ch == 'q' || ch == 'L') { len = 2; f++; continue; }
+            spec[sn++] = ch; f++;
+            if (strchr("diouxXeEfgGaAcspn", ch)) break;             // conversion ends here
+        }
+        spec[sn] = 0;
+        const char conv = sn ? spec[sn - 1] : 0;
+
+        char tmp[512];
+        switch (conv) {
+            case 'd': case 'i': {
+                if (len >= 2) { char h[64]; snprintf(h, sizeof h, "%.*sll%c", (int)sn - 1, spec, conv);
+                                snprintf(tmp, sizeof tmp, h, (long long)(int64_t)va.u64()); }
+                else            snprintf(tmp, sizeof tmp, spec, (int)va.u32());
+                put(tmp, strlen(tmp)); break;
+            }
+            case 'u': case 'o': case 'x': case 'X': {
+                if (len >= 2) { char h[64]; snprintf(h, sizeof h, "%.*sll%c", (int)sn - 1, spec, conv);
+                                snprintf(tmp, sizeof tmp, h, (unsigned long long)va.u64()); }
+                else            snprintf(tmp, sizeof tmp, spec, (unsigned)va.u32());
+                put(tmp, strlen(tmp)); break;
+            }
+            case 'c': snprintf(tmp, sizeof tmp, spec, (int)va.u32()); put(tmp, strlen(tmp)); break;
+            case 'e': case 'E': case 'f': case 'F': case 'g': case 'G': case 'a': case 'A': {
+                // Variadic floats are promoted to double, so this is always a
+                // 64-bit slot even when the guest wrote %f for a float.
+                uint64_t bits = va.u64(); double d; memcpy(&d, &bits, sizeof d);
+                snprintf(tmp, sizeof tmp, spec, d); put(tmp, strlen(tmp)); break;
+            }
+            case 's': {
+                uint32_t gp = va.u32();
+                const char* sv = (gp && gp < g_region) ? (const char*)toHost(gp) : "(null)";
+                // Bound the copy: an unterminated guest string must not be
+                // walked off the end of the region by the host's snprintf.
+                uint32_t slen = gp ? gStrlen(gp) : 6;
+                char bounded[512];
+                uint32_t take = slen < sizeof bounded - 1 ? slen : sizeof bounded - 1;
+                memcpy(bounded, sv, take); bounded[take] = 0;
+                snprintf(tmp, sizeof tmp, spec, bounded); put(tmp, strlen(tmp)); break;
+            }
+            case 'p': {
+                snprintf(tmp, sizeof tmp, "0x%08x", va.u32()); put(tmp, strlen(tmp)); break;
+            }
+            case 'n': { va.u32(); break; }                     // consumed, never written
+            default:  put(spec, sn); break;
+        }
+    }
+    out[n < cap - 1 ? n : cap - 1] = 0;
+    return n;
+}
+
 static inline char*  hstr(uint32_t g) { return g ? (char*)toHost(g) : nullptr; }
 static inline void*  hptr(uint32_t g) { return g ? (void*)toHost(g) : nullptr; }
 
@@ -523,7 +655,11 @@ static bool dispatch(CpuState& c, const char* name, uint32_t& ret) {
     // ── mem/str: translate pointer args, return values may be guest pointers.
     //    Bounds-check every length against the guest region so a bad pointer or
     //    size can never write into the Core's own host memory. ──
-    if (!strcmp(name, "memcpy") || !strcmp(name, "memmove")) {
+    if (!strcmp(name, "memcpy") || !strcmp(name, "memmove") ||
+        !strcmp(name, "__aeabi_memcpy")  || !strcmp(name, "__aeabi_memcpy4") ||
+        !strcmp(name, "__aeabi_memcpy8") || !strcmp(name, "__aeabi_memmove") ||
+        !strcmp(name, "__aeabi_memmove4")|| !strcmp(name, "__aeabi_memmove8") ||
+        !strcmp(name, "mempcpy")) {
         uint32_t d=arg(c,0), s=arg(c,1), n=arg(c,2);
         if (guestValid(d,n) && guestValid(s,n)) memmove(hptr(d), hptr(s), n);
         else compatLogFmt("arm32: %s OOB d=0x%x s=0x%x n=0x%x — skipped", name, d, s, n);
@@ -620,6 +756,73 @@ static bool dispatch(CpuState& c, const char* name, uint32_t& ret) {
         if (!strcmp(name,"ceilf")){ retF(ceilf(xf)); return true; }
         if (!strcmp(name,"powf")) { retF(powf(xf, argF(1))); return true; }
         if (!strcmp(name,"atan2f")){ retF(atan2f(xf, argF(1))); return true; }
+    }
+
+    // ── printf family ──
+    //
+    // Everything funnels through one formatter; the only differences are where
+    // the arguments come from and where the result goes. Guest-visible output
+    // goes to the log rather than a real stdout, which is the only place a
+    // Switch can show it.
+    {
+        static char fbuf[4096];
+        const bool is_v = name[0] == 'v' || (name[0] == '_' && strstr(name, "_vprint"));
+
+        auto fmtInto = [&](uint32_t gfmt, GuestVa& va) -> int {
+            return (int)gvformat(fbuf, sizeof fbuf, gfmt, va);
+        };
+
+        if (!strcmp(name,"printf") || !strcmp(name,"vprintf")) {
+            GuestVa va; if (is_v) va.p = arg(c, 1); else { va.c = &c; va.i = 1; }
+            int n = fmtInto(arg(c, 0), va);
+            compatLogFmt("game: %s", fbuf);
+            ret = (uint32_t)n; return true;
+        }
+        if (!strcmp(name,"fprintf") || !strcmp(name,"vfprintf")) {
+            GuestVa va; if (is_v) va.p = arg(c, 2); else { va.c = &c; va.i = 2; }
+            int n = fmtInto(arg(c, 1), va);
+            FILE* f = gfile(arg(c, 0));
+            if (f == stdout || f == stderr || !f) compatLogFmt("game: %s", fbuf);
+            else fwrite(fbuf, 1, (size_t)n < sizeof fbuf ? (size_t)n : sizeof fbuf - 1, f);
+            ret = (uint32_t)n; return true;
+        }
+        if (!strcmp(name,"sprintf") || !strcmp(name,"vsprintf")) {
+            GuestVa va; if (is_v) va.p = arg(c, 2); else { va.c = &c; va.i = 2; }
+            int n = fmtInto(arg(c, 1), va);
+            uint32_t d = arg(c, 0);
+            if (d && guestValid(d, (uint32_t)n + 1)) memcpy(toHost(d), fbuf, (size_t)n + 1);
+            ret = (uint32_t)n; return true;
+        }
+        if (!strcmp(name,"snprintf") || !strcmp(name,"vsnprintf")) {
+            GuestVa va; if (is_v) va.p = arg(c, 3); else { va.c = &c; va.i = 3; }
+            int n = fmtInto(arg(c, 2), va);
+            uint32_t d = arg(c, 0), cap = arg(c, 1);
+            if (d && cap) {
+                uint32_t take = ((uint32_t)n < cap - 1) ? (uint32_t)n : cap - 1;
+                if (guestValid(d, take + 1)) { memcpy(toHost(d), fbuf, take); *((char*)toHost(d) + take) = 0; }
+            }
+            ret = (uint32_t)n;                      // the length it *would* have been
+            return true;
+        }
+        if (!strcmp(name,"asprintf") || !strcmp(name,"vasprintf")) {
+            GuestVa va; if (is_v) va.p = arg(c, 2); else { va.c = &c; va.i = 2; }
+            int n = fmtInto(arg(c, 1), va);
+            uint32_t buf = guestAlloc((uint32_t)n + 1);
+            if (buf) memcpy(toHost(buf), fbuf, (size_t)n + 1);
+            if (arg(c, 0) && guestValid(arg(c, 0), 4)) *(uint32_t*)toHost(arg(c, 0)) = buf;
+            ret = buf ? (uint32_t)n : (uint32_t)-1;
+            return true;
+        }
+        if (!strcmp(name,"__android_log_print") || !strcmp(name,"__android_log_vprint")) {
+            GuestVa va; if (is_v) va.p = arg(c, 3); else { va.c = &c; va.i = 3; }
+            int n = fmtInto(arg(c, 2), va);
+            compatLogFmt("game[%s]: %s", arg(c, 1) ? hstr(arg(c, 1)) : "?", fbuf);
+            ret = (uint32_t)n; return true;
+        }
+        if (!strcmp(name,"__android_log_write") || !strcmp(name,"__android_log_assert")) {
+            compatLogFmt("game[%s]: %s", arg(c, 1) ? hstr(arg(c, 1)) : "?", arg(c, 2) ? hstr(arg(c, 2)) : "");
+            ret = 0; return true;
+        }
     }
 
     // ── libc misc ──

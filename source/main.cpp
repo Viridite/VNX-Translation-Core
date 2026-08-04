@@ -1602,7 +1602,7 @@ struct App {
             };
             center(fLg, "Viridite", C_WHITE);
             center(fSm, BUILD_VERSION, C_DIM);
-            center(fSm, "by aaronworld.uk", C_GRAY);
+            center(fSm, "by Viridite Contributors", C_GRAY);
             y += 10;
             center(fSm, "Android NDK compatibility layer for Nintendo Switch (HorizonOS)", C_GRAY);
 
