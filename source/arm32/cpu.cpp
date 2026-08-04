@@ -71,7 +71,7 @@ static bool condPass(CpuState& c, uint32_t cond) {
 // A 16-entry ring costs two stores per taken branch and nothing when nothing
 // goes wrong, which is the only kind of instrumentation worth leaving in an
 // interpreter's hot path.
-struct BrRec { uint32_t from, to; uint8_t was_t, now_t; };
+struct BrRec { uint32_t from, to, insn; uint8_t was_t, now_t; };
 // The module's executable range, so a PC that wanders out of it is caught at
 // the boundary instead of wherever it eventually fails to decode.
 uint32_t g_text_lo = 0, g_text_hi = 0;
@@ -82,6 +82,13 @@ static uint32_t s_br_n = 0;
 static inline void traceBranch(uint32_t from, uint32_t to, bool was_t, bool now_t) {
     BrRec& r = s_br[s_br_n & 63];
     r.from = from; r.to = to; r.was_t = was_t; r.now_t = now_t;
+    // The word that actually branched, read now rather than when the trace is
+    // printed. A previous trace recorded a branch from 0x11a5764 landing at
+    // 0x165e8fc when the instruction on disk there is an unconditional B to
+    // 0x165eaa0 — 0x1A4 away. Reading the opcode at dump time cannot tell a bad
+    // decode apart from memory that changed after the branch was taken; reading
+    // it here can, because this runs at the moment of the transfer.
+    r.insn = guestValid(from, 4) ? *(const uint32_t*)toHost(from) : 0;
     s_br_n++;
 }
 
@@ -123,10 +130,28 @@ void cpuDumpBranches(void) {
         // Numbered, because compatLog folds consecutive identical lines into
         // "x5" — which silently shortened the last dump and made a full ring
         // look like a partial one.
-        compatLogFmt("arm32:    %2u 0x%08x (%s) -> 0x%08x (%s)%s",
+        // Every entry carries the opcode that made the jump, captured when it
+        // was taken. For an ARM B/BL the target is a pure function of the word
+        // and the address, so recompute it here: if it disagrees with where
+        // execution actually went, the interpreter is at fault, and if it
+        // agrees, the trace is telling the truth and the fault is elsewhere.
+        char extra[72] = "";
+        if (!r.was_t && (r.insn & 0x0E000000) == 0x0A000000 &&
+            (r.insn >> 28) != 0xF) {
+            int32_t  off  = (int32_t)(r.insn << 8) >> 6;
+            uint32_t want = r.from + 8 + (uint32_t)off;
+            if (want != r.to)
+                snprintf(extra, sizeof(extra), "   [insn %08x encodes 0x%08x — MISMATCH]",
+                         r.insn, want);
+            else
+                snprintf(extra, sizeof(extra), "   [insn %08x ok]", r.insn);
+        } else if (r.insn) {
+            snprintf(extra, sizeof(extra), "   [insn %08x]", r.insn);
+        }
+        compatLogFmt("arm32:    %2u 0x%08x (%s) -> 0x%08x (%s)%s%s",
                      i - start, r.from, r.was_t ? "T" : "A", r.to,
                      r.now_t ? "T" : "A",
-                     (r.was_t != r.now_t) ? "   [mode change]" : "");
+                     (r.was_t != r.now_t) ? "   [mode change]" : "", extra);
     }
 }
 
@@ -337,6 +362,63 @@ static uint32_t shiftReg(CpuState& c, uint32_t val, uint32_t type, uint32_t amt,
     return val;
 }
 
+// VLD1/VST1, multiple single elements.
+//
+// These live at 0xF4xxxxxx, which isVFP() does not claim — it looks for
+// coprocessor 10/11 in the 0xC/0xE opcode space, and this is neither. The word
+// therefore fell through to the generic single-data-transfer decoder, which
+// read it as a post-indexed STRB and wrote one byte to whatever Rn held. Where
+// Rn was a PC-relative pointer into .text that silently rewrote an instruction:
+// a `b` two words later picked up an offset 0x1A4 short and landed inside a
+// Thumb veneer table, which is what "UNIMPL ARM insn=0x1cf0f240" really was.
+//
+// `type` gives the number of consecutive doubleword registers involved. For
+// VLD1/VST1 the element size only affects alignment checking, so on a
+// little-endian host the transfer is a straight 8-bytes-per-register copy.
+static void execNeonLdSt(CpuState& c, uint32_t insn, uint32_t pc) {
+    const uint32_t rn   = (insn >> 16) & 0xF;
+    const uint32_t rm   =  insn        & 0xF;
+    const uint32_t type = (insn >> 8)  & 0xF;
+    const bool     load = (insn >> 21) & 1;
+    const uint32_t vd   = ((insn >> 12) & 0xF) | (((insn >> 22) & 1) << 4);
+
+    uint32_t nregs = 0;
+    switch (type) {
+        case 0x7: nregs = 1; break;
+        case 0xA: nregs = 2; break;
+        case 0x6: nregs = 3; break;
+        case 0x2: nregs = 4; break;
+        default:  break;                      // VLD2/3/4 and the lane forms
+    }
+    if (!nregs) {
+        if (cpuNoteUnimpl(insn))
+            compatLogFmt("arm32: UNIMPL NEON ld/st insn=0x%08x pc=0x%x type=%u",
+                         insn, pc, type);
+        c.halt = true; c.halt_pc = pc;
+        return;
+    }
+
+    const uint32_t addr  = c.r[rn];
+    const uint32_t bytes = nregs * 8;
+    if (!guestValid(addr, bytes)) {
+        compatLogFmt("arm32: NEON %s of %u bytes at bad address 0x%x (pc=0x%x)",
+                     load ? "load" : "store", bytes, addr, pc);
+        c.halt = true; c.halt_pc = pc;
+        return;
+    }
+    for (uint32_t i = 0; i < nregs; i++) {
+        const uint32_t d = (vd + i) & 31;
+        if (load) c.vfp[d] = *(const uint64_t*)toHost(addr + i * 8);
+        else      *(uint64_t*)toHost(addr + i * 8) = c.vfp[d];
+    }
+
+    // Rm encodes the write-back: 15 means none, 13 means advance by the size
+    // transferred, anything else is a register-held stride.
+    if      (rm == 15) { /* no write-back */ }
+    else if (rm == 13) c.r[rn] = addr + bytes;
+    else               c.r[rn] = addr + c.r[rm];
+}
+
 // ── ARM (32-bit) step ───────────────────────────────────────────────────────
 static void stepArm(CpuState& c) {
     g_it_suppress = false;              // ARM has no IT; flags behave normally
@@ -366,6 +448,22 @@ static void stepArm(CpuState& c) {
             c.r[rd] = (crn==13 && op2==3) ? g_tls : 0;   // c13,c0,3 = thread pointer
         }
         return;                                      // MCR (barrier/cache) = no-op
+    }
+
+    // Advanced SIMD, which shares the unconditional (cond=0b1111) space with
+    // BLX and matches none of the coprocessor patterns above. Both halves are
+    // claimed here so that no SIMD word can reach the ARM data-processing or
+    // load/store decoders, where it would quietly do something plausible and
+    // wrong rather than fail.
+    if ((insn & 0xFF100000) == 0xF4000000) { execNeonLdSt(c, insn, pc); return; }
+    if ((insn & 0xFE000000) == 0xF2000000) {
+        // SIMD data processing. Not implemented — but halting names it, where
+        // falling through would have executed it as an AND/ADD on core
+        // registers and carried on with corrupted state.
+        if (cpuNoteUnimpl(insn))
+            compatLogFmt("arm32: UNIMPL NEON data-proc insn=0x%08x pc=0x%x", insn, pc);
+        c.halt = true; c.halt_pc = pc;
+        return;
     }
 
     // BLX (immediate) — ARM to Thumb, always.
@@ -466,19 +564,28 @@ static void stepArm(CpuState& c) {
         uint32_t op = (insn >> 21) & 0xF;
         bool     S  = (insn >> 20) & 1;
         uint32_t rn = (insn >> 16) & 0xF, rd = (insn >> 12) & 0xF;
+        // Reading r15 as an operand yields the address of this instruction
+        // plus 8, not the interpreter's already-advanced r15. Without this,
+        // `add r0, pc, #imm` — the standard way ARM code forms a PC-relative
+        // pointer — came out four bytes low, so every literal, string and
+        // table address derived that way pointed into the middle of the
+        // previous word. Load/store already got this right (see below), which
+        // is why it went unnoticed here.
+        auto rdR = [&](uint32_t i) -> uint32_t { return i == 15 ? pc + 8 : c.r[i]; };
+
         uint32_t opnd; bool shco = cf(c);
         if (insn & 0x02000000) {                          // immediate operand2
             uint32_t imm = insn & 0xFF, rot = ((insn >> 8) & 0xF) * 2;
             opnd = rot ? (imm >> rot) | (imm << (32-rot)) : imm;
             if (rot) shco = opnd >> 31;
         } else if ((insn & 0x10) == 0) {                  // register, immediate shift
-            uint32_t rm = c.r[insn & 0xF], type = (insn >> 5) & 3, amt = (insn >> 7) & 0x1F;
+            uint32_t rm = rdR(insn & 0xF), type = (insn >> 5) & 3, amt = (insn >> 7) & 0x1F;
             opnd = shiftImm(c, rm, type, amt, S, shco);
         } else {                                          // register, register shift
-            uint32_t rm = c.r[insn & 0xF], type = (insn >> 5) & 3, amt = c.r[(insn >> 8) & 0xF] & 0xFF;
+            uint32_t rm = rdR(insn & 0xF), type = (insn >> 5) & 3, amt = c.r[(insn >> 8) & 0xF] & 0xFF;
             opnd = shiftReg(c, rm, type, amt, shco);
         }
-        uint32_t vn = c.r[rn], res = 0; bool wb = true;
+        uint32_t vn = rdR(rn), res = 0; bool wb = true;
         switch (op) {
             case 0x0: res = vn & opnd; break;                         // AND
             case 0x1: res = vn ^ opnd; break;                         // EOR
