@@ -1053,6 +1053,125 @@ struct App {
     // main thread. Reads shared state written by the loader thread (g_ui_stage,
     // g_ui_pct). Y toggles the compat_log.txt feed back on for debugging.
     // ------------------------------------------------------------------
+    // ── The loading screen ──────────────────────────────────────────────────
+    //
+    // Deliberately not the logo. The reveal at the end is the logo's moment, and
+    // it cannot land if the same artwork has been on screen for the previous
+    // thirty seconds — so loading is an application screen instead: the game
+    // being loaded, named, with an honest account of how far along it is.
+    //
+    // Left-aligned, because the reveal is centred and the cut between them
+    // should read as a change of scene rather than a change of contents.
+    void drawLoadingScreen(Uint32 now, Uint32 elapsed_s) {
+        mainPhase("loading/layout");
+
+        const int PAD  = 96;
+        const int ICON = 176;
+        const int IY   = 232;
+        const int TX   = PAD + ICON + 48;     // text column
+
+        // ── The game's own icon, as the subject of the screen ──
+        mainPhase("loading/icon");
+        if (gameIconTex) {
+            // A soft plate behind it, so a dark or transparent icon still reads
+            // as a raised object rather than a hole.
+            fillRoundedRect(PAD - 6, IY - 6, ICON + 12, ICON + 12, 44,
+                            {0, 168, 84, 28});
+            SDL_Rect id = {PAD, IY, ICON, ICON};
+            SDL_RenderCopy(rdr, gameIconTex, nullptr, &id);
+        } else {
+            fillRoundedRect(PAD, IY, ICON, ICON, 40, {0, 168, 84, 46});
+        }
+
+        // ── Title ──
+        mainPhase("loading/title");
+        static char titleBuf[96];
+        if (launchTitle.empty()) snprintf(titleBuf, sizeof titleBuf, "Loading");
+        else                     snprintf(titleBuf, sizeof titleBuf, "%s", launchTitle.c_str());
+        drawText(fBootT, titleBuf, {0, 60, 32, 255}, TX, IY + 18);
+
+        // ── Stage, with the elapsed nudge kept from the old screen ──
+        mainPhase("loading/stage");
+        static char status[160];
+        snprintf(status, sizeof status, "%s",
+                 g_ui_stage[0] ? g_ui_stage : "Reading game data");
+        if (elapsed_s >= 30) {
+            size_t sl = strlen(status);
+            snprintf(status + sl, sizeof status - sl, " — still working");
+        }
+        drawText(fBootS, status, {0, 102, 51, 160}, TX, IY + 74);
+
+        // ── Percentage, right-aligned against the end of the bar ──
+        const int BARX = TX;
+        const int BARW = SW - TX - PAD;
+        const int BARY = IY + 132;
+
+        mainPhase("loading/pct");
+        if (g_ui_pct > 0) {
+            char pctBuf[8];
+            const int pct = g_ui_pct > 100 ? 100 : g_ui_pct;
+            snprintf(pctBuf, sizeof pctBuf, "%d%%", pct);
+            int w = 0, h = 0;
+            TTF_SizeUTF8(fBootS, pctBuf, &w, &h);
+            drawText(fBootS, pctBuf, {0, 117, 63, 200}, BARX + BARW - w, IY + 74);
+        }
+
+        // ── Material 3 Expressive wavy progress indicator ──
+        //
+        // The completed portion is a travelling sine wave and the remainder is
+        // a flat track, which is what makes it read as *moving* even when a
+        // long stage leaves the percentage still. Amplitude eases out as it
+        // fills, so the finish settles instead of thrashing at 99%.
+        mainPhase("loading/wave");
+        const float pctF = (g_ui_pct > 0) ? (g_ui_pct > 100 ? 1.0f : g_ui_pct / 100.0f)
+                                          : 0.0f;
+        const float phase  = (now % 1400) / 1400.0f;      // one wavelength / 1.4s
+        const float lambda = 56.0f;
+        const float amp    = 5.0f * (1.0f - pctF * pctF); // calm at the end
+        const SDL_Color TRACK = {0, 168, 84, 40};
+        const SDL_Color WAVE_A = {0, 200, 83, 255}, WAVE_B = {0, 117, 63, 255};
+
+        int filled = (int)(BARW * pctF + 0.5f);
+        if (g_ui_pct <= 0) {
+            // Indeterminate: a short wave packet travelling the whole track,
+            // rather than a bar pretending to know a number it has not got.
+            const int PKT = (int)(BARW * 0.28f);
+            int sx = (int)((now % 1800) / 1800.0f * (BARW + PKT)) - PKT;
+            for (int i = 0; i < BARW; i++) {
+                const bool inPkt = (i >= sx && i < sx + PKT);
+                const float y = amp * sinf(6.2831853f * (i / lambda - phase));
+                if (inPkt) {
+                    const float k = (float)(i - sx) / PKT;
+                    const float env = sinf(k * 3.1415926f);   // fade both ends
+                    SDL_Color c = lerpCol(WAVE_A, WAVE_B, k);
+                    c.a = (Uint8)(255.0f * env);
+                    fill(BARX + i, BARY + (int)(y * env) - 2, 1, 4, c);
+                } else {
+                    fill(BARX + i, BARY - 1, 1, 2, TRACK);
+                }
+            }
+        } else {
+            for (int i = 0; i < BARW; i++) {
+                if (i < filled) {
+                    const float y = amp * sinf(6.2831853f * (i / lambda - phase));
+                    fill(BARX + i, BARY + (int)y - 2, 1, 4,
+                         lerpCol(WAVE_A, WAVE_B, i / (float)BARW));
+                } else {
+                    fill(BARX + i, BARY - 1, 1, 2, TRACK);
+                }
+            }
+            // M3 puts a stop dot at the far end of the track; it gives the bar
+            // a definite length, so partial progress reads against a whole.
+            fillCircle(BARX + BARW - 2, BARY, 2, {0, 168, 84, 90});
+        }
+
+        // ── Wordmark, small and out of the way. It is not the subject here. ──
+        mainPhase("loading/wordmark");
+        const int wmW = trackedWidth(fBootF, "VIRIDITE", 3);
+        drawTrackedCentered(fBootF, "VIRIDITE", {0, 102, 51, 64},
+                            SW - PAD - wmW / 2, SH - 56, 3);
+    }
+
     void showProgress() {
         Uint32 now = SDL_GetTicks();
         mainPhase("showProgress/buildBootAssets");
@@ -1074,6 +1193,11 @@ struct App {
         if (bootBgTex) SDL_RenderCopy(rdr, bootBgTex, nullptr, nullptr);
         else           fill(0, 0, SW, SH, C_BG);
 
+        // Everything from here to the caption is the logo: the rings it spins
+        // in, the gem, and the break. It belongs to the reveal at the end, not
+        // to loading — a loading screen that *is* the logo leaves the logo with
+        // nowhere to land, which is what made the two indistinguishable.
+        if (revealing()) {
         mainPhase("draw/rings");
         // ── Counter-rotating rings (ringSpin 6s linear) ──
         float spin = (now % 6000) / 6000.0f * 360.0f;
@@ -1170,6 +1294,7 @@ struct App {
 
         mainPhase("draw/caption");
         // ── Caption: game title over stage text + blinking dots ──
+        {
         static char titleBuf[96];
         if (launchTitle.empty()) snprintf(titleBuf, sizeof(titleBuf), "NOW LOADING");
         else                     upperAsciiInto(titleBuf, sizeof(titleBuf), launchTitle.c_str());
@@ -1218,9 +1343,11 @@ struct App {
             }
         }
 
-        mainPhase("draw/footer");
-        // ── Footer wordmark ──
+        }
         drawTrackedCentered(fBootF, "VIRIDITE", {0, 102, 51, 77}, SW / 2, SH - 48, 3);
+        } else {
+            drawLoadingScreen(now, elapsed_s);
+        }
 
         // The last fifth of the reveal dips to black, and bootFadeDraw() picks
         // the picture back up over the game's first frames — so the two screens
