@@ -126,6 +126,17 @@ LoadedElf32 elf32Load(const char* host_path) {
     if (jmp) applyRels(jmp, jmpsz / sizeof(Rel));
 
     // 4) Find JNI_OnLoad by scanning the dynsym.
+    // Executable range: the PT_LOAD segments marked executable, so the
+    // interpreter can tell "still in code" from "ran into data".
+    g_text_lo = g_text_hi = 0;
+    for (uint32_t i = 0; i < eh->phnum; i++) {
+        if (ph[i].type != A_PT_LOAD || !(ph[i].flags & 1 /*PF_X*/)) continue;
+        uint32_t lo = s_bias + ph[i].vaddr, hi = lo + ph[i].memsz;
+        if (!g_text_lo || lo < g_text_lo) g_text_lo = lo;
+        if (hi > g_text_hi) g_text_hi = hi;
+    }
+    compatLogFmt("arm32: executable range 0x%x..0x%x", g_text_lo, g_text_hi);
+
     out.jni_onload = elf32Sym("JNI_OnLoad");
 
     out.load_bias = bias;

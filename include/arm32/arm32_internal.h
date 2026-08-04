@@ -65,6 +65,8 @@ uint32_t elf32Sym(const char* name);
 void bridgeCall(CpuState& cpu, uint32_t sentinel);
 // Register the name a sentinel maps to (called during import resolution).
 bool     requestedAbort(void);
+// Executable range of the loaded module; set by the ELF32 loader.
+extern uint32_t g_text_lo, g_text_hi;
 // Present the frame the guest just drew. Lives in the loader, which owns
 // the EGL context — the interpreter should not be reaching into EGL itself.
 void     a32FrameSwap(void);

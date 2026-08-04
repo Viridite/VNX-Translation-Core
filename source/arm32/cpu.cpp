@@ -72,11 +72,15 @@ static bool condPass(CpuState& c, uint32_t cond) {
 // goes wrong, which is the only kind of instrumentation worth leaving in an
 // interpreter's hot path.
 struct BrRec { uint32_t from, to; uint8_t was_t, now_t; };
-static BrRec  s_br[16];
+// The module's executable range, so a PC that wanders out of it is caught at
+// the boundary instead of wherever it eventually fails to decode.
+uint32_t g_text_lo = 0, g_text_hi = 0;
+
+static BrRec  s_br[64];
 static uint32_t s_br_n = 0;
 
 static inline void traceBranch(uint32_t from, uint32_t to, bool was_t, bool now_t) {
-    BrRec& r = s_br[s_br_n & 15];
+    BrRec& r = s_br[s_br_n & 63];
     r.from = from; r.to = to; r.was_t = was_t; r.now_t = now_t;
     s_br_n++;
 }
@@ -109,11 +113,19 @@ void cpuDumpUnimplSummary(void) {
 
 void cpuDumpBranches(void) {
     compatLog("arm32:   last control transfers (oldest first):");
-    uint32_t start = (s_br_n > 16) ? s_br_n - 16 : 0;
+    // 64, not 16. The last dump ended five megabytes short of the halt, which
+    // means the ring did not reach back far enough to contain the branch that
+    // mattered — and a trace that stops before the interesting part is worse
+    // than none, because it invites conclusions about the wrong transfer.
+    uint32_t start = (s_br_n > 64) ? s_br_n - 64 : 0;
     for (uint32_t i = start; i < s_br_n; i++) {
-        const BrRec& r = s_br[i & 15];
-        compatLogFmt("arm32:     0x%08x (%s) -> 0x%08x (%s)%s",
-                     r.from, r.was_t ? "T" : "A", r.to, r.now_t ? "T" : "A",
+        const BrRec& r = s_br[i & 63];
+        // Numbered, because compatLog folds consecutive identical lines into
+        // "x5" — which silently shortened the last dump and made a full ring
+        // look like a partial one.
+        compatLogFmt("arm32:    %2u 0x%08x (%s) -> 0x%08x (%s)%s",
+                     i - start, r.from, r.was_t ? "T" : "A", r.to,
+                     r.now_t ? "T" : "A",
                      (r.was_t != r.now_t) ? "   [mode change]" : "");
     }
 }
@@ -1078,6 +1090,20 @@ void cpuRun(CpuState& c) {
             continue;
         }
         if (c.r[15] == A32_RETURN_TRAP || c.r[15] == 0) break;   // guest fn returned
+
+        // Execution must stay inside the module's executable range.
+        //
+        // The last halt was 5MB past the final recorded branch: execution fell
+        // off the end of a function and ran forward through whatever decoded,
+        // until something did not. By then the PC says nothing about the cause.
+        // Catching it at the text boundary stops at the point it went wrong,
+        // where the branch trace still describes how it got there.
+        if (g_text_lo && (c.r[15] < g_text_lo || c.r[15] >= g_text_hi)) {
+            compatLogFmt("arm32: PC 0x%x left executable range [0x%x,0x%x) — halt",
+                         c.r[15], g_text_lo, g_text_hi);
+            cpuDumpBranches();
+            c.halt = true; c.halt_pc = c.r[15]; break;
+        }
 
         // PC must point at real guest code — never let a wild branch send the
         // fetch into host memory outside the region (fetch reads toHost(pc)).
