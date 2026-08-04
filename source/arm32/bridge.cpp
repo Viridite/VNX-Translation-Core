@@ -6,6 +6,9 @@
 #include "compat/loader.h"
 #include <GLES2/gl2.h>
 #include <utility>
+#include <cerrno>
+#include <sys/stat.h>
+#include <switch.h>
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
@@ -325,9 +328,158 @@ static bool dispatchGL(CpuState& c, const char* name, uint32_t& ret) {
 #undef GLA
 #undef GLP
 
+
+// ─── Batch: everything the game reaches after its constructors ──────────────
+// The log named three unbridged imports — fmaxf, strtoll and __stack_chk_fail
+// — and an unbridged import returns 0. strtoll answering 0 for every parse and
+// fmaxf answering 0 for every comparison is not a stall, it is the game
+// computing with wrong numbers, which is how a run ends up executing data.
+//
+// Discovering these one launch at a time would take as many builds as there
+// are functions, so this covers what a cocos2d-x title predictably reaches
+// next: the float maths, the string parsing, the fortified variants and the
+// formatted output. Each is small; the reason they were missing is that the
+// bridge was written far enough to load a game, not to run one.
+//
+// Floats arrive in core registers (softfp) and are returned the same way, so
+// RETF packs the result back into r0 rather than leaving it in the VFP bank.
+#define A(n)   arg(c, n)
+#define F(n)   fArg(c, n)
+#define RETF(x) do { float _v = (x); memcpy(&ret, &_v, 4); return true; } while (0)
+
+static bool dispatchMore(CpuState& c, const char* name, uint32_t& ret) {
+    ret = 0;
+    // ── float maths ──────────────────────────────────────────────────────────
+    if (!strcmp(name,"fmaxf"))  RETF(fmaxf(F(0), F(1)));
+    if (!strcmp(name,"fminf"))  RETF(fminf(F(0), F(1)));
+    if (!strcmp(name,"acosf"))  RETF(acosf(F(0)));
+    if (!strcmp(name,"asinf"))  RETF(asinf(F(0)));
+    if (!strcmp(name,"atanf"))  RETF(atanf(F(0)));
+    if (!strcmp(name,"expf"))   RETF(expf(F(0)));
+    if (!strcmp(name,"exp2f"))  RETF(exp2f(F(0)));
+    if (!strcmp(name,"fmodf"))  RETF(fmodf(F(0), F(1)));
+    if (!strcmp(name,"roundf")) RETF(roundf(F(0)));
+    if (!strcmp(name,"tanf"))   RETF(tanf(F(0)));
+    if (!strcmp(name,"sinhf"))  RETF(sinhf(F(0)));
+    if (!strcmp(name,"coshf"))  RETF(coshf(F(0)));
+    if (!strcmp(name,"tanhf"))  RETF(tanhf(F(0)));
+    if (!strcmp(name,"lroundf")) { ret = (uint32_t)(int32_t)lroundf(F(0)); return true; }
+    if (!strcmp(name,"sincosf")) {
+        float sn, cs; sn = sinf(F(0)); cs = cosf(F(0));
+        if (A(1)) memcpy(toHost(A(1)), &sn, 4);
+        if (A(2)) memcpy(toHost(A(2)), &cs, 4);
+        return true;
+    }
+
+    // ── string parsing ───────────────────────────────────────────────────────
+    if (!strcmp(name,"strtoll") || !strcmp(name,"strtoull")) {
+        // Returns 64 bits, which under AAPCS come back in r0:r1.
+        char* end = nullptr;
+        unsigned long long v = strtoull(hstr(A(0)), &end, (int)A(2));
+        if (A(1) && end) *(uint32_t*)toHost(A(1)) = (uint32_t)(A(0) + (end - hstr(A(0))));
+        c.r[1] = (uint32_t)(v >> 32);
+        ret    = (uint32_t)v;
+        return true;
+    }
+    if (!strcmp(name,"strtod")) {
+        char* end = nullptr;
+        double v = strtod(hstr(A(0)), &end);
+        if (A(1) && end) *(uint32_t*)toHost(A(1)) = (uint32_t)(A(0) + (end - hstr(A(0))));
+        uint64_t bits; memcpy(&bits, &v, 8);
+        c.r[1] = (uint32_t)(bits >> 32);
+        ret    = (uint32_t)bits;
+        return true;
+    }
+    if (!strcmp(name,"atoll")) {
+        long long v = atoll(hstr(A(0)));
+        c.r[1] = (uint32_t)((unsigned long long)v >> 32);
+        ret    = (uint32_t)v;
+        return true;
+    }
+    if (!strcmp(name,"strcoll")) { ret = (uint32_t)strcmp(hstr(A(0)), hstr(A(1))); return true; }
+    if (!strcmp(name,"strpbrk")) {
+        char* r = strpbrk(hstr(A(0)), hstr(A(1)));
+        ret = r ? (uint32_t)(A(0) + (r - hstr(A(0)))) : 0;
+        return true;
+    }
+    if (!strcmp(name,"strerror")) {
+        // Returns a pointer the guest must be able to read, so the text is
+        // copied into guest memory and kept — callers treat it as static.
+        static uint32_t g_err = 0;
+        if (!g_err) g_err = guestAlloc(128);
+        if (g_err) snprintf((char*)toHost(g_err), 128, "%s", strerror((int)A(0)));
+        ret = g_err;
+        return true;
+    }
+
+    // ── fortified variants ───────────────────────────────────────────────────
+    // The trailing argument is the destination size, and honouring it is the
+    // whole point of these — forwarding and dropping it would leave the game
+    // with no bounds checking exactly where it asked for some.
+    if (!strcmp(name,"__memcpy_chk"))  { uint32_t n=A(2), d=A(3); if (n>d) n=d; memcpy(toHost(A(0)), toHost(A(1)), n); ret=A(0); return true; }
+    if (!strcmp(name,"__memmove_chk")) { uint32_t n=A(2), d=A(3); if (n>d) n=d; memmove(toHost(A(0)),toHost(A(1)),n); ret=A(0); return true; }
+    if (!strcmp(name,"__strcpy_chk"))  { ret=A(0); strncpy(hstr(A(0)), hstr(A(1)), A(2)); return true; }
+    if (!strcmp(name,"__strcat_chk"))  { ret=A(0); strncat(hstr(A(0)), hstr(A(1)), A(2)); return true; }
+    if (!strcmp(name,"__strlen_chk"))  { { const char* p0=hstr(A(0)); uint32_t l=0; while (p0 && l<A(1) && p0[l]) l++; ret=l; } return true; }
+
+    // ── stack protector ──────────────────────────────────────────────────────
+    // Reaching this means a canary check failed, which is a real problem in the
+    // guest and not something to paper over — say so loudly and stop this call
+    // rather than returning 0 and letting it continue on a smashed stack.
+    if (!strcmp(name,"__stack_chk_fail")) {
+        compatLog("arm32: __stack_chk_fail — guest stack canary was overwritten");
+        cpuDumpBranches();
+        c.halt = true; c.halt_pc = c.r[15];
+        return true;
+    }
+    if (!strcmp(name,"__assert2")) {
+        compatLogFmt("arm32: assert %s:%u %s", A(0)?hstr(A(0)):"?", A(1), A(3)?hstr(A(3)):"?");
+        c.halt = true; c.halt_pc = c.r[15];
+        return true;
+    }
+    if (!strcmp(name,"__errno")) {
+        static uint32_t g_errno = 0;
+        if (!g_errno) g_errno = guestAlloc(4);
+        if (g_errno) *(uint32_t*)toHost(g_errno) = (uint32_t)errno;
+        ret = g_errno;
+        return true;
+    }
+
+    // ── ctype / wide ─────────────────────────────────────────────────────────
+    if (!strcmp(name,"towlower"))  { ret = (uint32_t)tolower((int)A(0)); return true; }
+    if (!strcmp(name,"towupper"))  { ret = (uint32_t)toupper((int)A(0)); return true; }
+    if (!strcmp(name,"iswalpha"))  { ret = isalpha((int)A(0))?1:0; return true; }
+    if (!strcmp(name,"iswdigit"))  { ret = isdigit((int)A(0))?1:0; return true; }
+    if (!strcmp(name,"iswspace"))  { ret = isspace((int)A(0))?1:0; return true; }
+    if (!strcmp(name,"iswupper"))  { ret = isupper((int)A(0))?1:0; return true; }
+    if (!strcmp(name,"iswlower"))  { ret = islower((int)A(0))?1:0; return true; }
+    if (!strcmp(name,"iswpunct"))  { ret = ispunct((int)A(0))?1:0; return true; }
+    if (!strcmp(name,"iswcntrl"))  { ret = iscntrl((int)A(0))?1:0; return true; }
+    if (!strcmp(name,"iswprint"))  { ret = isprint((int)A(0))?1:0; return true; }
+    if (!strcmp(name,"iswxdigit")) { ret = isxdigit((int)A(0))?1:0; return true; }
+    if (!strcmp(name,"btowc"))     { ret = A(0); return true; }
+    if (!strcmp(name,"wctob"))     { ret = (A(0) < 256) ? A(0) : (uint32_t)-1; return true; }
+
+    // ── misc ─────────────────────────────────────────────────────────────────
+    if (!strcmp(name,"sched_yield")) { svcSleepThread(0); return true; }
+    if (!strcmp(name,"getcwd"))      { if (A(0) && A(1)) { snprintf(hstr(A(0)), A(1), "/"); ret = A(0); } return true; }
+    if (!strcmp(name,"remove"))      { ret = (uint32_t)remove(hstr(A(0))); return true; }
+    if (!strcmp(name,"rename"))      { ret = (uint32_t)rename(hstr(A(0)), hstr(A(1))); return true; }
+    if (!strcmp(name,"mkdir"))       { ret = (uint32_t)mkdir(hstr(A(0)), 0777); return true; }
+    if (!strcmp(name,"glHint"))              { glHint(A(0), A(1)); return true; }
+    if (!strcmp(name,"glIsProgram"))         { ret = glIsProgram(A(0)); return true; }
+    if (!strcmp(name,"glValidateProgram"))   { glValidateProgram(A(0)); return true; }
+    if (!strcmp(name,"glUniformMatrix2fv"))  { glUniformMatrix2fv((GLint)A(0),A(1),(GLboolean)A(2),(const GLfloat*)hptr(A(3))); return true; }
+    return false;
+}
+#undef A
+#undef F
+#undef RETF
+
 static bool dispatch(CpuState& c, const char* name, uint32_t& ret) {
     // GL first: it is the hottest path once the game is drawing.
     if (name[0]=='g' && name[1]=='l' && dispatchGL(c, name, ret)) return true;
+    if (dispatchMore(c, name, ret)) return true;
 
     // ── allocator: must stay inside the guest region and return guest addrs ──
     if (!strcmp(name, "malloc"))  { ret = guestAlloc(arg(c,0)); return true; }
