@@ -418,8 +418,28 @@ static bool dispatchMore(CpuState& c, const char* name, uint32_t& ret) {
     // with no bounds checking exactly where it asked for some.
     if (!strcmp(name,"__memcpy_chk"))  { uint32_t n=A(2), d=A(3); if (n>d) n=d; memcpy(toHost(A(0)), toHost(A(1)), n); ret=A(0); return true; }
     if (!strcmp(name,"__memmove_chk")) { uint32_t n=A(2), d=A(3); if (n>d) n=d; memmove(toHost(A(0)),toHost(A(1)),n); ret=A(0); return true; }
-    if (!strcmp(name,"__strcpy_chk"))  { ret=A(0); strncpy(hstr(A(0)), hstr(A(1)), A(2)); return true; }
-    if (!strcmp(name,"__strcat_chk"))  { ret=A(0); strncat(hstr(A(0)), hstr(A(1)), A(2)); return true; }
+    if (!strcmp(name,"__strcpy_chk")) {
+        // strncpy does not terminate when the source fills the buffer, so the
+        // guest would be handed an unterminated string — the next strlen walks
+        // off the end and the fault surfaces somewhere unrelated.
+        char* d = hstr(A(0)); const char* sp = hstr(A(1)); uint32_t cap = A(2);
+        if (d && sp && cap) { strncpy(d, sp, cap); d[cap - 1] = 0; }
+        ret = A(0);
+        return true;
+    }
+    if (!strcmp(name,"__strcat_chk")) {
+        // strncat's third argument is how many characters to append, not the
+        // size of the destination — passing the destination size lets it write
+        // strlen(dst)+n+1 bytes, which is precisely the overflow this call
+        // exists to prevent. Budget from what is left instead.
+        char* d = hstr(A(0)); const char* sp = hstr(A(1)); uint32_t cap = A(2);
+        if (d && sp && cap) {
+            uint32_t dl = 0; while (dl < cap && d[dl]) dl++;
+            if (dl + 1 < cap) strncat(d, sp, cap - dl - 1);
+        }
+        ret = A(0);
+        return true;
+    }
     if (!strcmp(name,"__strlen_chk"))  { { const char* p0=hstr(A(0)); uint32_t l=0; while (p0 && l<A(1) && p0[l]) l++; ret=l; } return true; }
 
     // ── stack protector ──────────────────────────────────────────────────────
@@ -427,7 +447,18 @@ static bool dispatchMore(CpuState& c, const char* name, uint32_t& ret) {
     // guest and not something to paper over — say so loudly and stop this call
     // rather than returning 0 and letting it continue on a smashed stack.
     if (!strcmp(name,"__stack_chk_fail")) {
-        compatLog("arm32: __stack_chk_fail — guest stack canary was overwritten");
+        // Two different faults produce this, and they need opposite fixes: the
+        // guard variable itself being wrong (our storage, so our bug) versus
+        // the copy on the guest's stack being overwritten (the guest scribbling,
+        // or an instruction that moves SP wrongly). Print the guard so the log
+        // says which — "still 0xDEADC0DE" means the stack copy was clobbered.
+        uint32_t gaddr = bridgeRegisterData("__stack_chk_guard");
+        uint32_t gval  = gaddr ? *(uint32_t*)toHost(gaddr) : 0;
+        compatLogFmt("arm32: __stack_chk_fail — guard@0x%x is 0x%08x (%s), sp=0x%x",
+                     gaddr, gval,
+                     gval == 0xDEADC0DE ? "intact, so the stack copy was overwritten"
+                                        : "CHANGED — the guard variable itself was written",
+                     c.r[13]);
         cpuDumpBranches();
         c.halt = true; c.halt_pc = c.r[15];
         return true;
