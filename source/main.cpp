@@ -18,6 +18,8 @@
 #include "compat/loader.h"
 #include "compat/jingle.h"
 #include "compat/bootfade.h"
+#include "compat/reveal.h"
+#include "compat/achievements.h"
 #include "arm32/arm32.h"
 #include "build_number.h"
 #include "avatar.h"
@@ -262,19 +264,15 @@ struct App {
     std::vector<Star> stars;
     float selAnimY = -1.0f;        // eased focus-card position (borealis-style)
 
-    // ── Boot animation (shown while a game loads) ───────────────────────
-    // Native port of animation/"Viridite Boot Animation.dc.html": the gem from
-    // viridite1.svg floating inside two counter-rotating arc rings, with a
-    // white sweep clipped to the gem, sparkles, and a tracked-caps caption.
-    SDL_Texture* gemTex    = nullptr;  // romfs:/viridite_gem.png (viridite1.svg)
+    // ── Loading screen + reveal ─────────────────────────────────────────
+    // The artwork of the reveal itself is drawn by compat/reveal.cpp, which
+    // needs no assets — it is vectors, not a logo texture. What is kept here is
+    // the loading screen's backdrop and the fonts both screens caption with.
     SDL_Texture* bootBgTex = nullptr;  // radial-gradient backdrop
-    SDL_Texture* ringOutTex = nullptr; // outer arcs — spins forward
-    SDL_Texture* ringInTex  = nullptr; // inner arc  — spins reverse
-    SDL_Texture* gemFrame   = nullptr; // render target: gem + sweep, alpha-clipped
-    SDL_Texture* sweepTex   = nullptr; // white gradient band
     TTF_Font*    fBootT = nullptr;     // 15px caps title
     TTF_Font*    fBootS = nullptr;     // 13px caps status
     TTF_Font*    fBootF = nullptr;     // 11px caps footer
+    TTF_Font*    fMark  = nullptr;     // 20px caps — the reveal's caption
     bool         bootReady   = false;
     std::string  launchTitle;          // game name shown under the gem
     SDL_Texture* gameIconTex = nullptr;// launching game's icon (revealed by the gem)
@@ -282,6 +280,7 @@ struct App {
 
     // One-shot README screenshot flags (each screen captured once per run)
     bool shotMenu = false, shotLoading = false, shotResult = false, shotAbout = false;
+    bool shotReveal = false;
 
     // A game session leaves JIT regions and worker threads behind that we
     // can't fully unload yet — a second launch reads garbage ("not an ARM
@@ -395,15 +394,12 @@ struct App {
         for (auto* t : icons) if (t) SDL_DestroyTexture(t);
         // Boot-animation assets
         if (gameIconTex) SDL_DestroyTexture(gameIconTex);
-        if (gemTex)     SDL_DestroyTexture(gemTex);
         if (bootBgTex)  SDL_DestroyTexture(bootBgTex);
-        if (ringOutTex) SDL_DestroyTexture(ringOutTex);
-        if (ringInTex)  SDL_DestroyTexture(ringInTex);
-        if (gemFrame)   SDL_DestroyTexture(gemFrame);
-        if (sweepTex)   SDL_DestroyTexture(sweepTex);
+        reveal::release();
         if (fBootT && fBootT != fSm) TTF_CloseFont(fBootT);
         if (fBootS && fBootS != fSm) TTF_CloseFont(fBootS);
         if (fBootF && fBootF != fSm) TTF_CloseFont(fBootF);
+        if (fMark  && fMark  != fSm) TTF_CloseFont(fMark);
         if (fBtn) TTF_CloseFont(fBtn);
         if (fLg)  TTF_CloseFont(fLg);
         if (fMd && fMd != fSm) TTF_CloseFont(fMd);
@@ -838,84 +834,21 @@ struct App {
         return t;
     }
 
-    // An anti-aliased ring carrying one or more coloured arcs. Angles are in
-    // degrees, 0 = right and rising counter-clockwise, matching how CSS lays a
-    // border-<side>-color onto a circle (top = 45°..135°, right = 315°..45°).
-    struct Arc { float a0, a1; SDL_Color c; };
-    SDL_Texture* makeArcRing(int size, float radius, float thick,
-                             const std::vector<Arc>& arcs) {
-        SDL_Surface* s = SDL_CreateRGBSurfaceWithFormat(0, size, size, 32, SDL_PIXELFORMAT_RGBA32);
-        if (!s) return nullptr;
-        SDL_memset(s->pixels, 0, (size_t)s->h * s->pitch);
-        const float cx = size * 0.5f, cy = size * 0.5f;
-        for (int y = 0; y < size; y++) {
-            Uint32* row = (Uint32*)((Uint8*)s->pixels + y * s->pitch);
-            for (int x = 0; x < size; x++) {
-                float dx = x + 0.5f - cx, dy = y + 0.5f - cy;
-                float r  = sqrtf(dx * dx + dy * dy);
-                float cov = thick * 0.5f - fabsf(r - radius) + 0.5f;  // AA coverage
-                if (cov <= 0.0f) continue;
-                if (cov > 1.0f) cov = 1.0f;
-                float ang = atan2f(-dy, dx) * 180.0f / PI_F;
-                if (ang < 0.0f) ang += 360.0f;
-                for (const Arc& a : arcs) {
-                    bool in = (a.a0 <= a.a1) ? (ang >= a.a0 && ang <= a.a1)
-                                             : (ang >= a.a0 || ang <= a.a1);  // wraps 0°
-                    if (!in) continue;
-                    row[x] = SDL_MapRGBA(s->format, a.c.r, a.c.g, a.c.b,
-                                         (Uint8)(a.c.a * cov));
-                    break;
-                }
-            }
-        }
-        SDL_Texture* t = SDL_CreateTextureFromSurface(rdr, s);
-        SDL_FreeSurface(s);
-        return t;
-    }
-
-    // Horizontal transparent→white→transparent band (the gem's shine sweep).
-    SDL_Texture* makeSweep(int w, int h) {
-        SDL_Surface* s = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_RGBA32);
-        if (!s) return nullptr;
-        for (int x = 0; x < w; x++) {
-            float t = w > 1 ? x / (float)(w - 1) : 0.0f;
-            float a = (t < 0.5f ? t / 0.5f : (1.0f - t) / 0.5f) * 0.75f;
-            Uint32 px = SDL_MapRGBA(s->format, 255, 255, 255, (Uint8)(a * 255));
-            for (int y = 0; y < h; y++)
-                ((Uint32*)((Uint8*)s->pixels + y * s->pitch))[x] = px;
-        }
-        SDL_Texture* t = SDL_CreateTextureFromSurface(rdr, s);
-        SDL_FreeSurface(s);
-        if (t) SDL_SetTextureBlendMode(t, SDL_BLENDMODE_ADD);
-        return t;
-    }
-
     void buildBootAssets() {
         if (bootReady) return;
         bootReady = true;
         romfsInit();
-        SDL_Surface* g = IMG_Load("romfs:/viridite_gem.png");
-        if (g) { gemTex = SDL_CreateTextureFromSurface(rdr, g); SDL_FreeSurface(g); }
-        else   { logSDL("boot: gem png load failed"); }
 
         bootBgTex = makeRadialBg();
-        // Outer: strong top arc + faint right arc. Inner: soft bottom arc.
-        ringOutTex = makeArcRing(RING_TEX, 165.0f, 2.0f,
-                                 {{45.0f, 135.0f, {0, 168, 84, 217}},
-                                  {315.0f, 45.0f, {0, 168, 84, 38}}});
-        ringInTex  = makeArcRing(RING_TEX, 151.0f, 1.5f,
-                                 {{225.0f, 315.0f, {0, 200, 83, 89}}});
-        sweepTex   = makeSweep(57, GEM_PX);
-        gemFrame   = SDL_CreateTexture(rdr, SDL_PIXELFORMAT_RGBA8888,
-                                       SDL_TEXTUREACCESS_TARGET, GEM_PX, GEM_PX);
-        if (gemFrame) SDL_SetTextureBlendMode(gemFrame, SDL_BLENDMODE_BLEND);
 
         fBootT = openFont(15);
         fBootS = openFont(13);
         fBootF = openFont(11);
+        fMark  = openFont(20);
         if (!fBootT) fBootT = fSm;
         if (!fBootS) fBootS = fSm;
         if (!fBootF) fBootF = fSm;
+        if (!fMark)  fMark  = fSm;
     }
 
     // ── Tracked caps text (CSS letter-spacing) ──────────────────────────
@@ -971,15 +904,13 @@ struct App {
 
     // ── The reveal ──────────────────────────────────────────────────────────
     //
-    // While loading, the gem animation runs on a 4.8s loop and the progress bar
-    // reports where the work is. Once the game is actually ready, the same
-    // animation is driven once, deliberately, against the jingle: the gem
-    // pulses, breaks, the game's own icon bursts through, and the screen goes
-    // to black — from which the game itself fades up.
+    // Once the game is actually ready, the mark arrives, drops, breaks along its
+    // seam and the game's own icon rises out of it — the closing beat of the
+    // Origin Trailer, drawn rather than played back (see compat/reveal.cpp).
     //
-    // Reusing the loop's timeline rather than writing a second animation means
-    // the reveal is the thing the player has been watching all along, finally
-    // completing, instead of a different screen appearing at the end.
+    // It is a different screen from loading on purpose. Loading is an
+    // application screen about the game; this is the logo's one moment, and a
+    // logo cannot land if it has already been on screen for thirty seconds.
     Uint32 revealStart = 0;                // 0 = still loading
     float  revealSecs  = 3.1f;
 
@@ -989,15 +920,6 @@ struct App {
         float t = (SDL_GetTicks() - revealStart) / 1000.0f / revealSecs;
         return t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
     }
-
-    // Layout, transcribed from the design's centred flex column.
-    static constexpr int GEM_PX   = 240;   // gem render size
-    static constexpr int RING_TEX = 340;   // ring texture (340×340 box)
-    static constexpr int BLOCK_Y  = 134;   // top of the gem box
-    static constexpr int GEM_CY   = BLOCK_Y + 170;
-    static constexpr int TITLE_Y  = BLOCK_Y + 340 + 36;
-    static constexpr int STAT_Y   = TITLE_Y + 37;
-    static constexpr int BAR_Y    = STAT_Y + 35;
 
     // ------------------------------------------------------------------
     // Progress screen — fully animated, called at ~60fps from main thread.
@@ -1188,185 +1110,59 @@ struct App {
         }
         Uint32 elapsed_s = (now - s_stage_t) / 1000;
 
-        mainPhase("draw/backdrop");
-        // ── Backdrop ──
-        if (bootBgTex) SDL_RenderCopy(rdr, bootBgTex, nullptr, nullptr);
-        else           fill(0, 0, SW, SH, C_BG);
-
-        // Everything from here to the caption is the logo: the rings it spins
-        // in, the gem, and the break. It belongs to the reveal at the end, not
-        // to loading — a loading screen that *is* the logo leaves the logo with
-        // nowhere to land, which is what made the two indistinguishable.
         if (revealing()) {
-        mainPhase("draw/rings");
-        // ── Counter-rotating rings (ringSpin 6s linear) ──
-        float spin = (now % 6000) / 6000.0f * 360.0f;
-        SDL_Rect ringDst = {SW / 2 - RING_TEX / 2, GEM_CY - RING_TEX / 2, RING_TEX, RING_TEX};
-        if (ringOutTex) SDL_RenderCopyEx(rdr, ringOutTex, nullptr, &ringDst,  spin, nullptr, SDL_FLIP_NONE);
-        if (ringInTex)  SDL_RenderCopyEx(rdr, ringInTex,  nullptr, &ringDst, -spin, nullptr, SDL_FLIP_NONE);
+            // ── The reveal ──────────────────────────────────────────────────
+            // The artwork is drawn by compat/reveal.cpp, which owns its own
+            // paper and needs none of the backdrop above. The caption is drawn
+            // here rather than in there so it goes through the glyph cache and
+            // lands at native resolution instead of through the supersample.
+            mainPhase("draw/reveal");
+            const float rt = revealT();
+            reveal::draw(rdr, rt, gameIconTex);
 
-        mainPhase("draw/sparkles");
-        // ── Sparkles (0%/100% hidden, 50% full) ──
-        struct Spark { int cx, cy, r; SDL_Color c; float period, delay; };
-        static const Spark SPARKS[] = {
-            {754, 166, 4, {185, 246, 202, 255}, 2200.0f, 0.0f},
-            {511, 407, 3, {105, 240, 174, 255}, 2800.0f, 900.0f},
-            {496, 232, 2, {0,   200, 83,  255}, 3100.0f, 1600.0f},
-        };
-        for (const Spark& s : SPARKS) {
-            float ph = fmodf((float)now + s.period - s.delay, s.period) / s.period;
-            float k  = 0.5f - 0.5f * cosf(ph * 2.0f * PI_F);
-            SDL_Color c = s.c; c.a = (Uint8)(255.0f * k);
-            fillCircle(s.cx, s.cy, (int)(s.r * (0.4f + 0.6f * k) + 0.5f), c);
-        }
-
-        // ── Gem → game-icon reveal ──────────────────────────────────────────
-        // Matches the boot animation: the gem pulses, then "breaks" and the
-        // launching game's own icon bursts through. Without a game icon it just
-        // keeps the gentle float. One 4.8s cycle.
-        const bool haveIcon = (gameIconTex != nullptr);
-        float lift = 0.0f, gemScale = 1.0f, gemAlpha = 1.0f;
-        // During the reveal the cycle is played once from just before the break,
-        // so the pulse-break-burst runs to time with the jingle rather than
-        // wherever the loop happened to be when loading finished.
-        float cyc = revealing() ? (0.34f + 0.63f * revealT())
-                                : (now % 4800) / 4800.0f;
-        if (!haveIcon) {
-            float fk = 0.5f - 0.5f * cosf(((now % 3400) / 3400.0f) * 2.0f * PI_F);
-            lift = -14.0f * fk; gemScale = 1.0f + 0.015f * fk;
-        } else if (cyc < 0.47f) {
-            gemScale = 1.0f + 0.05f * (0.5f - 0.5f * cosf((cyc / 0.47f) * 2.0f * PI_F));
-        } else if (cyc < 0.56f) {
-            float t = (cyc - 0.47f) / 0.09f; gemScale = 1.0f + 0.4f * t; gemAlpha = 1.0f - t;
-        } else {
-            gemAlpha = 0.0f;
-        }
-
-        if (gemTex && gemFrame && gemAlpha > 0.01f) {
-            mainPhase("gem/GetRenderTarget");
-            SDL_Texture* prev = SDL_GetRenderTarget(rdr);
-            mainPhase("gem/SetRenderTarget(gemFrame)");
-            SDL_SetRenderTarget(rdr, gemFrame);
-            mainPhase("gem/SetRenderDrawColor");
-            SDL_SetRenderDrawColor(rdr, 0, 0, 0, 0);
-            mainPhase("gem/RenderClear");
-            SDL_RenderClear(rdr);
-            mainPhase("gem/RenderCopy(gemTex)");
-            SDL_RenderCopy(rdr, gemTex, nullptr, nullptr);
-            if (sweepTex) {
-                mainPhase("gem/RenderCopyEx(sweep)");
-                float p = ((now % 2800) / 2800.0f) / 0.55f; if (p > 1.0f) p = 1.0f;
-                SDL_Rect sd = {(int)(-221.0f + p * 541.0f), 0, 57, GEM_PX};
-                SDL_RenderCopyEx(rdr, sweepTex, nullptr, &sd, -18.0, nullptr, SDL_FLIP_NONE);
+            const float capA = reveal::captionAlpha(rt);
+            if (capA > 0.004f) {
+                mainPhase("draw/revealCaption");
+                static char titleBuf[96];
+                if (launchTitle.empty()) snprintf(titleBuf, sizeof(titleBuf), "READY");
+                else                     upperAsciiInto(titleBuf, sizeof(titleBuf),
+                                                        launchTitle.c_str());
+                SDL_Color tc = bootTitle();
+                tc.a = (Uint8)(255.0f * capA);
+                drawTrackedCentered(fMark, titleBuf, tc, SW / 2, reveal::CAPTION_Y, 8);
             }
-            mainPhase("gem/SetRenderTarget(restore)");
-            SDL_SetRenderTarget(rdr, prev);
-            mainPhase("gem/blitGem");
-            int gw = (int)(GEM_PX * gemScale + 0.5f);
-            SDL_Rect gd = {SW / 2 - gw / 2, (int)(GEM_CY - gw / 2 + lift + 0.5f), gw, gw};
-            SDL_SetTextureAlphaMod(gemFrame, (Uint8)(gemAlpha * 255));
-            SDL_RenderCopy(rdr, gemFrame, nullptr, &gd);
-            SDL_SetTextureAlphaMod(gemFrame, 255);
-        }
 
-        mainPhase("draw/breakFlash");
-        // Flash at the break, then the game icon bursts in and holds.
-        if (haveIcon && cyc >= 0.52f && cyc < 0.63f) {
-            float t = (cyc - 0.52f) / 0.11f, a = t < 0.3f ? t / 0.3f : (1.0f - t) / 0.7f;
-            fillCircle(SW / 2, GEM_CY, (int)(150 * (0.7f + t)), {255, 255, 255, (Uint8)(190 * a)});
-        }
-        if (haveIcon && cyc >= 0.51f) {
-            mainPhase("draw/gameIcon");
-            float scale, alpha;
-            if      (cyc < 0.56f) { float u=(cyc-0.51f)/0.05f; scale=0.55f+0.17f*u; alpha=u; }
-            else if (cyc < 0.66f) { float u=(cyc-0.56f)/0.10f; scale=0.72f+0.32f*u; alpha=1.0f; }
-            else if (cyc < 0.72f) { float u=(cyc-0.66f)/0.06f; scale=1.04f-0.04f*u; alpha=1.0f; }
-            else if (cyc < 0.97f) { scale=1.0f; alpha=1.0f; }
-            else                  { scale=1.0f; alpha=1.0f-(cyc-0.97f)/0.03f; }
-            int isz = (int)(150 * scale + 0.5f);
-            fillRoundedRect(SW/2 - isz/2 - 4, GEM_CY - isz/2 - 4, isz + 8, isz + 8, 32,
-                            {255, 255, 255, (Uint8)(alpha * 240)});
-            SDL_SetTextureAlphaMod(gameIconTex, (Uint8)(alpha * 255));
-            SDL_Rect id = {SW/2 - isz/2, GEM_CY - isz/2, isz, isz};
-            SDL_RenderCopy(rdr, gameIconTex, nullptr, &id);
-            SDL_SetTextureAlphaMod(gameIconTex, 255);
-        }
+            mainPhase("draw/revealMark");
+            drawTrackedCentered(fBootF, "VIRIDITE", {0, 102, 51, 77}, SW / 2, SH - 48, 3);
 
-        mainPhase("draw/caption");
-        // ── Caption: game title over stage text + blinking dots ──
-        {
-        static char titleBuf[96];
-        if (launchTitle.empty()) snprintf(titleBuf, sizeof(titleBuf), "NOW LOADING");
-        else                     upperAsciiInto(titleBuf, sizeof(titleBuf), launchTitle.c_str());
-        drawTrackedCentered(fBootT, titleBuf, bootTitle(), SW / 2, TITLE_Y, 6);
+            // The last stretch dips to black, and bootFadeDraw() picks the
+            // picture back up over the game's first frames — so the two screens
+            // are joined by one continuous fade rather than a cut.
+            const float k = reveal::blackAlpha(rt);
+            if (k > 0.0f) fill(0, 0, SW, SH, {0, 0, 0, (Uint8)(255.0f * k)});
 
-        mainPhase("draw/stageText");
-        static char status[128];
-        if (g_ui_stage[0]) upperAsciiInto(status, sizeof(status), g_ui_stage);
-        else               snprintf(status, sizeof(status), "READING GAME DATA");
-        if (elapsed_s >= 30) {
-            size_t sl = strlen(status);
-            snprintf(status + sl, sizeof(status) - sl, " - STILL WORKING");
-        }
-        const SDL_Color statCol = {0, 102, 51, 140};
-        int stW   = trackedWidth(fBootS, status, 4);
-        int dotsW = 3 * 5 + 2 * 5;
-        int rowX  = SW / 2 - (stW + 10 + dotsW) / 2;
-        drawTrackedCentered(fBootS, status, statCol, rowX + stW / 2, STAT_Y, 4);
-        for (int i = 0; i < 3; i++) {
-            float ph = fmodf((float)now + 1400.0f - i * 200.0f, 1400.0f) / 1400.0f;
-            float u  = ph < 0.4f ? ph / 0.4f : (ph < 0.8f ? (0.8f - ph) / 0.4f : 0.0f);
-            SDL_Color c = bootDot(); c.a = (Uint8)(255.0f * (0.25f + 0.75f * u));
-            fillCircle(rowX + stW + 12 + i * 10, STAT_Y + 8, 2, c);
-        }
-
-        // ── Progress bar (280×3) — real percentage when the loader reports one,
-        //    otherwise the design's indeterminate slider.
-        mainPhase("draw/progressBar");
-        // Hidden during the reveal: the work is finished, so a bar reporting on
-        // it is the one element on screen still claiming otherwise.
-        if (!revealing()) {
-            const int BW = 280, BX = SW / 2 - BW / 2;
-            const SDL_Color BAR_A = {0, 200, 83, 255}, BAR_B = {0, 117, 63, 255};
-            fill(BX, BAR_Y, BW, 3, {0, 168, 84, 38});
-            if (g_ui_pct > 0) {
-                int pct = g_ui_pct > 100 ? 100 : g_ui_pct;
-                int fw  = BW * pct / 100;
-                for (int i = 0; i < fw; i++)
-                    fill(BX + i, BAR_Y, 1, 3, lerpCol(BAR_A, BAR_B, i / (float)BW));
-            } else {
-                const int SLW = (int)(BW * 0.35f);
-                int sx = (int)((now % 1600) / 1600.0f * (BW + SLW)) - SLW;
-                int x0 = std::max(BX, BX + sx), x1 = std::min(BX + BW, BX + sx + SLW);
-                for (int i = x0; i < x1; i++)
-                    fill(i, BAR_Y, 1, 3, lerpCol(BAR_A, BAR_B, (i - x0) / (float)SLW));
+            if (!shotReveal && rt > 0.62f && rt < 0.80f) {
+                shotReveal = true;
+                mainPhase("showProgress/screenshot");
+                saveScreenshot("ui_reveal.png");
             }
-        }
-
-        }
-        drawTrackedCentered(fBootF, "VIRIDITE", {0, 102, 51, 77}, SW / 2, SH - 48, 3);
         } else {
+            mainPhase("draw/backdrop");
+            if (bootBgTex) SDL_RenderCopy(rdr, bootBgTex, nullptr, nullptr);
+            else           fill(0, 0, SW, SH, C_BG);
             drawLoadingScreen(now, elapsed_s);
-        }
 
-        // The last fifth of the reveal dips to black, and bootFadeDraw() picks
-        // the picture back up over the game's first frames — so the two screens
-        // are joined by one continuous fade rather than a cut.
-        if (revealing()) {
-            const float t = revealT();
-            if (t > 0.80f) {
-                const float k = (t - 0.80f) / 0.20f;
-                fill(0, 0, SW, SH, {0, 0, 0, (Uint8)(255.0f * k * k)});
+            // Inside the loading branch, so a run that never reported 40% does
+            // not save a frame of the reveal under the loading screen's name.
+            if (!shotLoading && g_ui_pct >= 40) {
+                shotLoading = true;
+                mainPhase("showProgress/screenshot");
+                saveScreenshot("ui_loading.png");
             }
         }
 
         if (showLogPanel) { mainPhase("showProgress/logPanel"); drawLogPanel(); }
 
-        if (!shotLoading && g_ui_pct >= 40) {  // mid-load, gem in frame
-            shotLoading = true;
-            mainPhase("showProgress/screenshot");
-            saveScreenshot("ui_loading.png");
-        }
         mainPhase("showProgress/SDL_RenderPresent");
         SDL_RenderPresent(rdr);
         mainPhase("showProgress/done");
@@ -1399,6 +1195,12 @@ struct App {
         strncpy(g_ui_stage, verb, sizeof(g_ui_stage) - 1);
 
         loaderSetScreenOrient(apk.screenOrient);
+
+        // Open the achievement store before the game's code can reach a JNI
+        // call. The first unlock can happen surprisingly early — some titles
+        // fire a "welcome" achievement in their first scene — and one that
+        // arrives before the store is open would be dropped.
+        achievements::init(pkg.c_str());
 
         LoaderCtx ctx;
         ctx.apk_path    = apk.path;
@@ -1627,14 +1429,25 @@ struct App {
             compatLogFmt("boot: reveal starting (%.2fs)", revealSecs);
             compatLogFlush();
 
+            // The renderer is normally vsynced, in which case SDL_RenderPresent
+            // is already the frame wait and sleeping on top of it halves the
+            // rate — which the reveal, unlike the loading screen, can be seen
+            // to do: the drop and the shards both move far enough per frame for
+            // 30fps to read as a stutter. Only sleep if nothing else is pacing
+            // us (the software-renderer fallback).
+            SDL_RendererInfo ri = {};
+            const bool vsynced = SDL_GetRendererInfo(rdr, &ri) == 0 &&
+                                 (ri.flags & SDL_RENDERER_PRESENTVSYNC);
+
             revealStart = SDL_GetTicks();
             while (revealT() < 1.0f) {
                 SDL_Event ev; while (SDL_PollEvent(&ev)) {}
                 showProgress();
-                SDL_Delay(16);
+                if (!vsynced) SDL_Delay(16);
             }
             revealStart = 0;
             jingle::stop();
+            reveal::release();
             bootFadeBegin(0.75f);
             compatLog("boot: reveal done — handing the screen to the game");
             compatLogFlush();

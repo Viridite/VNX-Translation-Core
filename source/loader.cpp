@@ -1,5 +1,6 @@
 #include "compat/loader.h"
 #include "compat/bootfade.h"
+#include "compat/toast.h"
 #include "compat/orientation.h"
 
 // android:screenOrientation for the game being launched. Set by the caller
@@ -822,6 +823,7 @@ void a32::a32FrameSwap(void) {
     // through a per-context dispatch table, so calling one with nothing bound
     // is not a no-op — it is a null dereference, and this runs on every frame.
     bootFadeDraw();                       // the tail of the Viridite reveal
+    toast::draw();                        // achievement unlocks, over the game
     eglSwapBuffers(d, s);
 }
 
@@ -2060,6 +2062,7 @@ void runGameOnMainThread(void* game_so_ptr,
                 // paying this cost on every future test run.
 
                 bootFadeDraw();       // the tail of the Viridite reveal
+                toast::draw();        // achievement unlocks, over the game
                 // Swap buffers (Cocos2d-x doesn't call eglSwapBuffers itself)
                 if (g_egl_display != EGL_NO_DISPLAY && g_egl_surface != EGL_NO_SURFACE)
                     eglSwapBuffers(g_egl_display, g_egl_surface);
