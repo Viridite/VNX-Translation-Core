@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cmath>
 #include <cctype>
+#include <ctime>
 #include <strings.h>
 #include <vector>
 #include <string>
@@ -841,7 +842,43 @@ static bool dispatch(CpuState& c, const char* name, uint32_t& ret) {
     if (!strcmp(name,"getenv"))  { ret = 0; return true; }         // no env
     if (!strcmp(name,"rand"))    { ret = (uint32_t)rand(); return true; }
     if (!strcmp(name,"srand"))   { srand(arg(c,0)); ret = 0; return true; }
-    if (!strcmp(name,"time"))    { uint32_t p=arg(c,0); if(p && guestValid(p,4)) *(uint32_t*)toHost(p)=0; ret = 0; return true; }
+    if (!strcmp(name,"time")) {
+        const uint32_t now = (uint32_t)::time(nullptr);
+        uint32_t p = arg(c,0);
+        if (p && guestValid(p,4)) *(uint32_t*)toHost(p) = now;
+        ret = now; return true;
+    }
+    // clock_gettime and gettimeofday reach here — not cpu.cpp's raw-syscall
+    // `case 263`/`case 78` — because the game calls them as ordinary dynamic
+    // libc imports rather than issuing `svc` directly, and this dispatch table
+    // had no entry for either name. Left unhandled, the fallback in
+    // bridgeCall() returns 0 without writing the guest's output struct at all,
+    // so a frame-timing loop that reads "now" from it sees whatever was
+    // already in that memory — frozen or garbage, but never advancing. Hill
+    // Climb Racing calls clock_gettime(CLOCK_MONOTONIC, ...) once per frame
+    // for its render delta; with the output never written, the engine kept
+    // calling nativeRender at full speed (frames counted, none of the
+    // per-frame or per-instruction watchdogs are instruction-bound loops, so
+    // neither ever triggers) while gameplay never advanced — a freeze with no
+    // crash and no log evidence, needing a forced quit to notice at all.
+    if (!strcmp(name,"clock_gettime")) {
+        const uint32_t ts = arg(c,1);
+        if (ts && guestValid(ts,8)) {
+            const uint64_t ns = armTicksToNs(armGetSystemTick());
+            *(uint32_t*)toHost(ts)     = (uint32_t)(ns / 1000000000ull);
+            *(uint32_t*)toHost(ts + 4) = (uint32_t)(ns % 1000000000ull);
+        }
+        ret = 0; return true;
+    }
+    if (!strcmp(name,"gettimeofday")) {
+        const uint32_t tv = arg(c,0);
+        if (tv && guestValid(tv,8)) {
+            const uint64_t us = armTicksToNs(armGetSystemTick()) / 1000;
+            *(uint32_t*)toHost(tv)     = (uint32_t)(us / 1000000);
+            *(uint32_t*)toHost(tv + 4) = (uint32_t)(us % 1000000);
+        }
+        ret = 0; return true;
+    }
     if (!strcmp(name,"malloc_usable_size")) { ret = 0; return true; }
 
     // ── stdio file I/O — guest FILE* is an index into s_files; paths resolve
