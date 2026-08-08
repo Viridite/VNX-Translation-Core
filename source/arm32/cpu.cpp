@@ -574,7 +574,14 @@ static void stepArm(CpuState& c) {
     }
     // BX / BLX (register)
     if ((insn & 0x0FFFFFD0) == 0x012FFF10) {
-        uint32_t rm = c.r[insn & 0xF];
+        // Same PC-as-operand rule as the data-processing block above (see
+        // rdR), just never applied here: reading r15 as Rm must give pc+8 in
+        // ARM mode, not the interpreter's own already-advanced c.r[15]. Rare
+        // in practice — ARM code has little reason to BX its own PC — but
+        // it's the same class of bug as the Thumb BX/BLX handler, which
+        // real Thumb code hits constantly via "bx pc" to reach ARM.
+        uint32_t rmi = insn & 0xF;
+        uint32_t rm = (rmi == 15) ? (pc + 8) : c.r[rmi];
         if (insn & 0x20) c.r[14] = pc + 4;               // BLX
         c.cpsr = (rm & 1) ? (c.cpsr|C_T) : (c.cpsr&~C_T);
         c.r[15] = rm & ~1u;
@@ -1081,7 +1088,19 @@ static void stepThumb(CpuState& c) {
     }
     // BX / BLX register
     if ((op & 0xFF00) == 0x4700) {
-        uint32_t rm = c.r[(op>>3)&0xF];
+        // Reading PC as the source register must give this instruction's own
+        // address + 4 — the classic "BX PC" idiom old ARM/Thumb code uses to
+        // switch to ARM mode reads exactly that value, always 4-aligned by
+        // construction, and expects to land there. c.r[15] itself is already
+        // this interpreter's bookkeeping next-PC (pc+2) by this point, which
+        // is 2 bytes short of the architectural value and not 4-aligned
+        // either way. Reading it raw sent "bx pc" 2 bytes into the target
+        // instead of at its start, which is what put a stray ARM fetch 2
+        // bytes into Hill Climb Racing's linker veneer for nativeInit,
+        // decoded a garbage instruction from the misalignment, and branched
+        // to nonsense — a black screen with no crash to explain it.
+        uint32_t rmi = (op>>3)&0xF;
+        uint32_t rm = (rmi == 15) ? (pc + 4) : c.r[rmi];
         if (op & 0x80) c.r[14] = (pc + 2) | 1;              // BLX
         c.cpsr = (rm&1)?(c.cpsr|C_T):(c.cpsr&~C_T);
         c.r[15] = rm & ~1u;

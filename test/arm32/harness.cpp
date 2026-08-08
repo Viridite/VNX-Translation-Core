@@ -162,6 +162,20 @@ int main() {
     // sxtb: r1=0x80 → r0 = 0xffffff80
     { CpuState c = runT({0x2080 /*movs r0,#0x80*/, 0xb241 /*sxtb r1,r0*/, 0x4770}); check("thumb sxtb", c.r[1], 0xffffff80u); }
 
+    // "bx pc" — the classic Thumb→ARM interworking idiom old compilers emit
+    // for a linker veneer: bx pc, then a 2-byte nop pad so the ARM code
+    // starts 4-aligned right after. Reading pc as the Rm operand must give
+    // this instruction's own address + 4 (architecturally always 4-aligned),
+    // not the interpreter's bookkeeping next-PC — which is 2 bytes short and
+    // not 4-aligned, and lands inside the pad/first word instead of on the
+    // real ARM code. This is what silently wedged Hill Climb Racing's
+    // nativeInit on a black screen.
+    { uint32_t p[] = { 0x46c04778u /* bx pc ; nop (pad to 4-aligned) */,
+                       0xe3a0002au /* ARM: mov r0, #42 */,
+                       0xe12fff1eu /* ARM: bx lr */ };
+      CpuState c = runProg(p, 3, true);
+      check("thumb bx pc interworking", c.r[0], 42); }
+
     // ── Thumb-2 32-bit (encodings verified via capstone) ──
     // movw r0,#0x1234 ; movt r0,#0x5e78 → 0x5e781234
     { CpuState c = runT({0xf241,0x2034 /*movw r0,#0x1234*/, 0xf6c5,0x6078 /*movt r0,#0x5e78*/, 0x4770});
