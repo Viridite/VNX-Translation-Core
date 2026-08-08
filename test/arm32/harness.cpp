@@ -162,6 +162,31 @@ int main() {
     // sxtb: r1=0x80 → r0 = 0xffffff80
     { CpuState c = runT({0x2080 /*movs r0,#0x80*/, 0xb241 /*sxtb r1,r0*/, 0x4770}); check("thumb sxtb", c.r[1], 0xffffff80u); }
 
+    // ── Thumb-2 barriers must retire, not branch ──
+    // cond=0b111x in the branch-and-misc-control space is not a condition, it
+    // is the escape into miscellaneous control. Decoding it as B<cond>.W sent
+    // `dmb ish` 0xbfeb6 bytes forward into a data table and killed the
+    // constructor that builds Cocos2d-x's CCApplication singleton.
+    // Each: <barrier> ; movs r0,#7 ; bx lr — r0 must be 7, and no halt.
+    { CpuState c = runT({0xf3bf,0x8f5b /*dmb ish*/, 0x2007, 0x4770});
+      check("t2 dmb ish falls through", c.r[0], 7); check("t2 dmb no halt", c.halt?1:0, 0); }
+    { CpuState c = runT({0xf3bf,0x8f5f /*dmb sy*/,  0x2007, 0x4770});
+      check("t2 dmb sy falls through", c.r[0], 7); }
+    { CpuState c = runT({0xf3bf,0x8f4f /*dsb sy*/,  0x2007, 0x4770});
+      check("t2 dsb falls through", c.r[0], 7); }
+    { CpuState c = runT({0xf3bf,0x8f6f /*isb sy*/,  0x2007, 0x4770});
+      check("t2 isb falls through", c.r[0], 7); }
+    { CpuState c = runT({0xf3bf,0x8f2f /*clrex*/,   0x2007, 0x4770});
+      check("t2 clrex falls through", c.r[0], 7); }
+    // ...and a real conditional branch must still branch. beq.w +4 with Z set
+    // skips the movs, so r0 stays 0; with Z clear it falls through to 7.
+    { CpuState c = runT({0x2800 /*cmp r0,#0*/, 0xf000,0x8001 /*beq.w +2*/,
+                         0x2007 /*movs r0,#7*/, 0x4770});
+      check("t2 beq.w taken", c.r[0], 0); }
+    { CpuState c = runT({0x2801 /*cmp r0,#1*/, 0xf000,0x8001 /*beq.w +2*/,
+                         0x2007 /*movs r0,#7*/, 0x4770}, 0);
+      check("t2 beq.w not taken", c.r[0], 7); }
+
     // ── VFP: VMOV (immediate) ──
     // vmov.f32 s0,#imm ; vmov r0,s0 ; bx lr — so the encoded constant comes
     // back out through a core register. Encodings and expected values are from

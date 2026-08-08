@@ -815,11 +815,40 @@ static void stepThumb32(CpuState& c, uint32_t pc, uint16_t hw1) {
             c.r[15] = pc + 4 + off;
             return;
         }
-        // B<cond>.W (T3)
+        // B<cond>.W (T3) — but only for a real condition. cond=0b111x is not a
+        // condition at all: it is the escape hatch into "miscellaneous
+        // control", where the barriers and MSR/MRS live. Treating that space
+        // as a branch is not a near miss, it is a jump to a computed nonsense
+        // address — `dmb ish` (f3bf 8f5b) came out as an unconditional branch
+        // 0xbfeb6 bytes forward, into the middle of a data table. That landed
+        // mid-constructor: ctor[417] of 417 died there and was skipped, and
+        // ctor[417] is the one that constructs the Cocos2d-x CCApplication
+        // singleton. Every later sharedApplication() then asserted and Hill
+        // Climb Racing never started, having reported a clean launch.
         uint32_t cond = (hw1 >> 6) & 0xF;
-        int32_t off = (int32_t)((s<<20)|(j2<<19)|(j1<<18)|((hw1&0x3F)<<12)|(imm11<<1));
-        off = (off << 11) >> 11;
-        if (condPass(c, cond)) c.r[15] = pc + 4 + off;
+        if (cond < 0xE) {
+            int32_t off = (int32_t)((s<<20)|(j2<<19)|(j1<<18)|((hw1&0x3F)<<12)|(imm11<<1));
+            off = (off << 11) >> 11;
+            if (condPass(c, cond)) c.r[15] = pc + 4 + off;
+            return;
+        }
+        // Miscellaneous control. The memory barriers are genuinely nothing to
+        // do here — one interpreter thread, no store buffer to drain — so
+        // they retire as no-ops rather than being approximated.
+        if (hw1 == 0xF3BF && (hw2 & 0xFF00) == 0x8F00) {
+            switch ((hw2 >> 4) & 0xF) {
+                case 0x2:                     // CLREX
+                case 0x4:                     // DSB
+                case 0x5:                     // DMB
+                case 0x6: return;             // ISB
+                default: break;
+            }
+        }
+        // Anything else here (MSR/MRS and friends) is genuinely not handled.
+        // Halt and name it, rather than branching somewhere invented.
+        if (cpuNoteUnimpl(((uint32_t)hw1 << 16) | hw2))
+            compatLogFmt("arm32: UNIMPL Thumb2 misc-control %04x %04x pc=0x%x", hw1, hw2, pc);
+        c.halt = true; c.halt_pc = pc;
         return;
     }
 
