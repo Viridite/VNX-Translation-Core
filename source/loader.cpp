@@ -733,6 +733,32 @@ static bool isXapk(const std::string& path) {
     return zipContainsApks(path);
 }
 
+// Does this APK ship arm64 libraries? Asked so a cached install that has lost
+// them can be told apart from a game that genuinely never had them. Without
+// that distinction a 64-bit game silently runs on the 32-bit interpreter,
+// which is slower, far less complete, and looks like a broken game rather than
+// a broken install.
+static bool apkHasArm64Libs(const std::string& path) {
+    unzFile zf = unzOpen(path.c_str());
+    if (!zf) return false;
+    bool found = false;
+    unz_global_info gi;
+    if (unzGetGlobalInfo(zf, &gi) == UNZ_OK) {
+        char name[1024];
+        for (uLong i = 0; i < gi.number_entry && !found; i++) {
+            unz_file_info fi;
+            if (unzGetCurrentFileInfo(zf, &fi, name, sizeof(name), nullptr, 0, nullptr, 0) != UNZ_OK) break;
+            std::string n = name;
+            if (n.rfind("lib/arm64-v8a/", 0) == 0 && n.size() > 14 &&
+                n.size() > 3 && n.compare(n.size() - 3, 3, ".so") == 0)
+                found = true;
+            if (i + 1 < gi.number_entry && unzGoToNextFile(zf) != UNZ_OK) break;
+        }
+    }
+    unzClose(zf);
+    return found;
+}
+
 // Unpack every APK inside the XAPK through the normal extractApk path, merging
 // their arm64 libs + assets into one game dir. arm32/x86 splits are skipped
 // (nothing to contribute here); extractApk itself ignores non-arm64 libs, so
@@ -889,11 +915,23 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
             while (!installedFrom.empty() && (installedFrom.back()=='\n' || installedFrom.back()=='\r'))
                 installedFrom.pop_back();
         }
-        bool noLibs = findAllSos(lib_dir).empty() && findAllSos(base_dir + "/lib32").empty();
-        if (installedFrom != apk_path || noLibs) {
+        const bool haveArm64 = !findAllSos(lib_dir).empty();
+        const bool haveArm32 = !findAllSos(base_dir + "/lib32").empty();
+        const bool noLibs    = !haveArm64 && !haveArm32;
+        // An install holding only 32-bit libs for a game that ships 64-bit ones
+        // is stale, not a 32-bit game. Two builds of Hill Climb Racing share
+        // this package name — 1.67 has arm64, 1.70 is 32-bit only — so running
+        // the second wipes lib/ and leaves lib32/ behind, and the first then
+        // finds "some libs present" and launches on the ARM32 interpreter.
+        // Checking only whether *both* directories were empty could never see
+        // that: the game looked installed, just 64 bits lighter.
+        const bool lostArm64 = !haveArm64 && apkHasArm64Libs(apk_path);
+        if (installedFrom != apk_path || noLibs || lostArm64) {
             compatLogFmt("launchApk: re-extracting (%s)",
-                         noLibs ? "cached install has no arm64/arm32 libs — likely from an older build"
-                                : "cached install is from a different file");
+                         noLibs    ? "cached install has no arm64/arm32 libs — likely from an older build"
+                       : lostArm64 ? "cached install has no arm64 libs but this APK ships them — "
+                                     "left behind by a 32-bit build of the same package"
+                                   : "cached install is from a different file");
             rmTree(lib_dir);
             rmTree(base_dir + "/lib32");
             rmTree(asset_dir);
@@ -945,6 +983,14 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
         if (!sos32.empty()) {
             const std::string& main32 = sos32.back().second;   // largest
             compatLogFmt("engine: no arm64 — ARM32 emulation layer for %s", main32.c_str());
+            // Reaching here for an APK that ships arm64 means the extraction
+            // did not produce lib/ — the game is being run on the interpreter
+            // when it has a native build available. Say so plainly: silently
+            // downgrading reads as "the game is broken" for the rest of the log.
+            if (apkHasArm64Libs(apk_path))
+                compatLog("engine: WARNING — this APK ships arm64 libs but none were "
+                          "installed. The native path was skipped; that is an install "
+                          "fault, not a 32-bit game.");
 
             // The dry run must stop here too. Constructors are skipped through
             // elfRunCtors on the 64-bit path, but a 32-bit game runs inside the
