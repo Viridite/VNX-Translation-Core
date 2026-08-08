@@ -162,6 +162,28 @@ int main() {
     // sxtb: r1=0x80 → r0 = 0xffffff80
     { CpuState c = runT({0x2080 /*movs r0,#0x80*/, 0xb241 /*sxtb r1,r0*/, 0x4770}); check("thumb sxtb", c.r[1], 0xffffff80u); }
 
+    // ── Thumb-2 register shifts (LSL/LSR/ASR/ROR .W) ──
+    // movs r3,#4 ; <shift>.w r2,r1,r3 ; bx lr — r1 supplied as an initial reg.
+    // `asr.w` is what halted nativeInit; these share a prefix with the extend
+    // instructions and are told apart only by hw2, so SXTB is re-checked below.
+    { CpuState c = runT({0x2304, 0xfa01,0xf203, 0x4770}, 0, 1);
+      check("t2 lsl.w reg", c.r[2], 16u); }
+    { CpuState c = runT({0x2304, 0xfa21,0xf203, 0x4770}, 0, 0x80000000u);
+      check("t2 lsr.w reg", c.r[2], 0x08000000u); }
+    { CpuState c = runT({0x2304, 0xfa41,0xf203, 0x4770}, 0, 0x80000000u);
+      check("t2 asr.w reg", c.r[2], 0xf8000000u); }
+    { CpuState c = runT({0x2304, 0xfa61,0xf203, 0x4770}, 0, 1);
+      check("t2 ror.w reg", c.r[2], 0x10000000u); }
+    // ASR of a positive value must not sign-extend.
+    { CpuState c = runT({0x2304, 0xfa41,0xf203, 0x4770}, 0, 0x40000000u);
+      check("t2 asr.w reg positive", c.r[2], 0x04000000u); }
+    // Shift amount 0 must leave the value untouched.
+    { CpuState c = runT({0x2300, 0xfa41,0xf203, 0x4770}, 0, 0x12345678u);
+      check("t2 asr.w reg by 0", c.r[2], 0x12345678u); }
+    // The extend instructions share the prefix — they must still decode.
+    { CpuState c = runT({0x2080 /*movs r0,#0x80*/, 0xb241 /*sxtb r1,r0*/, 0x4770});
+      check("sxtb still decodes after shift split", c.r[1], 0xffffff80u); }
+
     // ── VMOV between a core register pair and a double ──
     // Round-trip: r0,r1 -> d0 -> r2,r3. These sit inside the VLDM encoding
     // space and were being executed as a VLDM of eight doublewords from a

@@ -1160,6 +1160,22 @@ static void stepThumb32(CpuState& c, uint32_t pc, uint16_t hw1) {
         }
         return;
     }
+    // ── LSL/LSR/ASR/ROR (register) — 1111 1010 0ttS Rn : 1111 Rd 0000 Rm ──
+    // The .W register-shift forms. They share the 1111 1010 0xxx prefix with
+    // the extend instructions below and are told apart by hw2: a shift has
+    // 1111 Rd 0000 Rm, an extend has bit 7 set. Nothing exotic — plain
+    // `asr.w r2,r1,r3` is what stopped nativeInit here, and the shift amount
+    // is the low byte of Rm, so it is the same helper the ARM decoder uses.
+    if ((hw1 & 0xFF80) == 0xFA00 && (hw2 & 0xF0F0) == 0xF000) {
+        const uint32_t rn = hw1 & 0xF, rd = (hw2 >> 8) & 0xF, rm = hw2 & 0xF;
+        const uint32_t type = (hw1 >> 5) & 3;          // 00 LSL 01 LSR 10 ASR 11 ROR
+        const bool     S    = (hw1 >> 4) & 1;
+        bool co = cf(c);
+        const uint32_t r = shiftReg(c, c.r[rn], type, c.r[rm] & 0xFF, co);
+        c.r[rd] = r;
+        if (S) { setNZ(c, r); setC(c, co); }
+        return;
+    }
     // ── SXTB/SXTH/UXTB/UXTH (+AB/AH accumulate) — 1111 1010 0xxx Rn ──
     if ((hw1 & 0xFF80) == 0xFA00 && (hw2 & 0xF080) == 0xF080) {
         uint32_t rm=hw2&0xF, rd=(hw2>>8)&0xF, rn=hw1&0xF, rot=((hw2>>4)&3)*8;

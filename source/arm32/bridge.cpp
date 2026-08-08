@@ -28,6 +28,15 @@ static std::vector<Import> s_imports;
 // exactly one value per key and no per-thread indirection to model.
 static std::vector<uint32_t> s_tls;
 
+// Set by a dispatch case that must hand control to guest code rather than
+// return a value. bridgeCall normally forces PC back to LR; when this is set
+// it jumps to s_tail_pc instead, leaving LR alone so the guest routine returns
+// straight to whoever made the original call. pthread_once is the only user:
+// its whole contract is "run this function", and a bridge that returns success
+// without running it silently drops the initialisation it was asked for.
+static bool     s_tail_call = false;
+static uint32_t s_tail_pc   = 0;
+
 // Guest FILE* handle table: a guest "FILE*" is (index into s_files)+1, so 0 is
 // a clean NULL. gfile() maps a handle back to the host FILE*.
 static std::vector<FILE*> s_files;
@@ -781,6 +790,11 @@ static bool dispatch(CpuState& c, const char* name, uint32_t& ret) {
         if (!strcmp(name,"pow"))  { retD(pow(x, argD(2))); return true; }
         if (!strcmp(name,"fmod")) { retD(fmod(x, argD(2))); return true; }
         if (!strcmp(name,"hypot")){ retD(hypot(x, argD(2))); return true; }
+        // scalbn/ldexp take an *int* second argument, not a double, so it sits
+        // in r2 alone rather than the r2:r3 pair the others use.
+        if (!strcmp(name,"scalbn") || !strcmp(name,"ldexp")) {
+            retD(scalbn(x, (int)(int32_t)arg(c,2))); return true;
+        }
         // float variants (arg/ret in r0)
         float xf=argF(0);
         if (!strcmp(name,"sqrtf")){ retF(sqrtf(xf)); return true; }
@@ -943,6 +957,21 @@ static bool dispatch(CpuState& c, const char* name, uint32_t& ret) {
         ret = 0; return true;                              // destructor ignored: no thread exits
     }
     if (!strcmp(name,"pthread_key_delete")) { ret = 0; return true; }
+    // pthread_once(control, routine). The control word is the guest's own, so
+    // marking it before jumping is what makes this run exactly once even
+    // though the routine returns past us.
+    if (!strcmp(name,"pthread_once")) {
+        const uint32_t ctl = arg(c,0), routine = arg(c,1);
+        ret = 0;
+        if (ctl && guestValid(ctl,4)) {
+            uint32_t* done = (uint32_t*)toHost(ctl);
+            if (*done == 0) {
+                *done = 1;
+                if (routine) { s_tail_call = true; s_tail_pc = routine; }
+            }
+        }
+        return true;
+    }
     if (!strcmp(name,"pthread_setspecific")) {
         const uint32_t key = arg(c,0);
         if (key && key <= s_tls.size()) s_tls[key-1] = arg(c,1);
@@ -999,10 +1028,20 @@ void bridgeCall(CpuState& c, uint32_t sentinel) {
     const char* name = (idx < s_imports.size()) ? s_imports[idx].name.c_str() : "?";
 
     uint32_t ret = 0;
+    s_tail_call = false;
     if (!dispatch(c, name, ret)) {
         static int warned = 0;
         if (warned < 200) { warned++; compatLogFmt("arm32: UNIMPL import %s (r0=0x%x r1=0x%x r2=0x%x)", name, c.r[0], c.r[1], c.r[2]); }
         ret = 0;   // best-effort stub
+    }
+    // A dispatch case that asked to hand off to guest code: jump there with LR
+    // untouched, so the routine returns to our caller and the shim disappears
+    // from the call chain entirely.
+    if (s_tail_call) {
+        s_tail_call = false;
+        c.cpsr  = (s_tail_pc & 1) ? (c.cpsr | 0x20) : (c.cpsr & ~0x20u);
+        c.r[15] = s_tail_pc & ~1u;
+        return;
     }
     c.r[0] = ret;
     c.r[15] = c.r[14];                 // return to LR
