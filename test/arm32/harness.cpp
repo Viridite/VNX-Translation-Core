@@ -162,6 +162,28 @@ int main() {
     // sxtb: r1=0x80 → r0 = 0xffffff80
     { CpuState c = runT({0x2080 /*movs r0,#0x80*/, 0xb241 /*sxtb r1,r0*/, 0x4770}); check("thumb sxtb", c.r[1], 0xffffff80u); }
 
+    // ── VFP: VMOV (immediate) ──
+    // vmov.f32 s0,#imm ; vmov r0,s0 ; bx lr — so the encoded constant comes
+    // back out through a core register. Encodings and expected values are from
+    // capstone, not hand-decoded. Hill Climb Racing's renderer hits #1.0 on
+    // every frame; halting there stalled the frame loop with a black screen.
+    { CpuState c = runProg((const uint32_t[]){0xeeb70a00u, 0xee100a10u, 0xe12fff1eu}, 3, false);
+      check("vfp vmov.f32 #1.0", c.r[0], 0x3f800000u); }
+    { CpuState c = runProg((const uint32_t[]){0xeeb60a00u, 0xee100a10u, 0xe12fff1eu}, 3, false);
+      check("vfp vmov.f32 #0.5", c.r[0], 0x3f000000u); }
+    { CpuState c = runProg((const uint32_t[]){0xeeb00a00u, 0xee100a10u, 0xe12fff1eu}, 3, false);
+      check("vfp vmov.f32 #2.0", c.r[0], 0x40000000u); }
+    { CpuState c = runProg((const uint32_t[]){0xeebf0a00u, 0xee100a10u, 0xe12fff1eu}, 3, false);
+      check("vfp vmov.f32 #-1.0", c.r[0], 0xbf800000u); }
+    { CpuState c = runProg((const uint32_t[]){0xeeb70a08u, 0xee100a10u, 0xe12fff1eu}, 3, false);
+      check("vfp vmov.f32 #1.5", c.r[0], 0x3fc00000u); }
+    { CpuState c = runProg((const uint32_t[]){0xeeb70a0fu, 0xee100a10u, 0xe12fff1eu}, 3, false);
+      check("vfp vmov.f32 #1.9375", c.r[0], 0x3ff80000u); }
+    { CpuState c = runProg((const uint32_t[]){0xeeb40a00u, 0xee100a10u, 0xe12fff1eu}, 3, false);
+      check("vfp vmov.f32 #0.125", c.r[0], 0x3e000000u); }
+    { CpuState c = runProg((const uint32_t[]){0xeeb20a0fu, 0xee100a10u, 0xe12fff1eu}, 3, false);
+      check("vfp vmov.f32 #15.5", c.r[0], 0x41780000u); }
+
     // "bx pc" — the classic Thumb→ARM interworking idiom old compilers emit
     // for a linker veneer: bx pc, then a 2-byte nop pad so the ARM code
     // starts 4-aligned right after. Reading pc as the Rm operand must give

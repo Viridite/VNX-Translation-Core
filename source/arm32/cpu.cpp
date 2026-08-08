@@ -208,6 +208,26 @@ static void     setS(CpuState& c, uint32_t n, uint32_t v){
 // CPSR on VMRS APSR_nzcv.
 static uint32_t g_fpscr_nzcv = 0;
 
+// VFPExpandImm (ARM ARM A6.4.1): VMOV (immediate) packs a floating-point
+// constant into 8 bits as sign, a compressed exponent, and the top four
+// fraction bits. Only values with the low fraction bits zero are encodable,
+// which is why it exists at all — it covers the small constants real code is
+// full of (1.0, 0.5, 2.0, ...) without a literal pool load.
+static double vfpExpandImm(uint32_t imm8, bool dp) {
+    const uint32_t sign  = (imm8 >> 7) & 1;
+    const uint32_t b6    = (imm8 >> 6) & 1;
+    const uint32_t lo    = (imm8 >> 4) & 3;      // imm8<5:4>
+    const uint32_t frac4 =  imm8       & 0xF;
+    if (dp) {
+        // exp = NOT(b6) : Replicate(b6,8) : imm8<5:4>  — 11 bits
+        const uint32_t exp = ((b6 ? 0u : 1u) << 10) | ((b6 ? 0xFFu : 0u) << 2) | lo;
+        return u2d(((uint64_t)sign << 63) | ((uint64_t)exp << 52) | ((uint64_t)frac4 << 48));
+    }
+    // exp = NOT(b6) : Replicate(b6,5) : imm8<5:4>      — 8 bits
+    const uint32_t exp = ((b6 ? 0u : 1u) << 7) | ((b6 ? 0x1Fu : 0u) << 2) | lo;
+    return (double)u2f((sign << 31) | (exp << 23) | (frac4 << 19));
+}
+
 static bool execVFP(CpuState& c, uint32_t w) {
     uint32_t cpn = (w >> 8) & 0xF;               // coprocessor 10 (F32) / 11 (F64)
     if (cpn != 10 && cpn != 11) return false;
@@ -276,7 +296,17 @@ static bool execVFP(CpuState& c, uint32_t w) {
             case 4: wD(rN(n)/rN(m)); return true;                                     // VDIV
             case 7: {                                                                // extension family
                 uint32_t opc2=vn, opc3=(w>>6)&3;
-                if (opc3 == 0) break;                       // VMOV immediate — rare, log
+                // VMOV (immediate). Anything but rare: Hill Climb Racing's
+                // renderer reaches `vmov.f32 s0,#1.0` on every frame, and
+                // halting here meant the frame loop gave up 240 frames in with
+                // nothing drawn. In this encoding the opc2 field is not an
+                // opcode at all — it is the immediate's top nibble — so it has
+                // to be decoded before the opc2 switch below, not inside it.
+                if (opc3 == 0) {
+                    if ((w & 0xF0) != 0) break;             // not the VMOV-imm form
+                    wD(vfpExpandImm(((w >> 12) & 0xF0) | (w & 0xF), dp));
+                    return true;
+                }
                 switch (opc2) {
                     case 0x0: wD((opc3&2) ? fabs(rN(m)) : rN(m)); return true;         // VABS / VMOV reg
                     case 0x1: wD((opc3&2) ? sqrt(rN(m)) : -rN(m)); return true;        // VSQRT / VNEG

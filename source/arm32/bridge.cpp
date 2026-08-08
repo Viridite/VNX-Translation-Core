@@ -680,6 +680,28 @@ static bool dispatch(CpuState& c, const char* name, uint32_t& ret) {
         else compatLogFmt("arm32: memset OOB d=0x%x n=0x%x — skipped", d, n);
         ret = d; return true;
     }
+    // The AEABI zero-fill helpers. These are not spelled like memset: there is
+    // no value argument at all, and __aeabi_memset takes its length BEFORE the
+    // byte (the reverse of C memset), so routing them through the memset case
+    // above would fill with a length or clear nothing. Missing them was not
+    // harmless — the stub returned success without zeroing, so a freshly
+    // allocated block kept whatever was in it, and Hill Climb Racing's
+    // nativeInit read a function pointer out of the garbage and branched to
+    // 0xfc. Anything that allocates then clears depends on these.
+    if (!strcmp(name, "__aeabi_memclr")  || !strcmp(name, "__aeabi_memclr4") ||
+        !strcmp(name, "__aeabi_memclr8")) {
+        uint32_t d=arg(c,0), n=arg(c,1);
+        if (guestValid(d,n)) memset(hptr(d), 0, n);
+        else compatLogFmt("arm32: %s OOB d=0x%x n=0x%x — skipped", name, d, n);
+        ret = d; return true;
+    }
+    if (!strcmp(name, "__aeabi_memset")  || !strcmp(name, "__aeabi_memset4") ||
+        !strcmp(name, "__aeabi_memset8")) {
+        uint32_t d=arg(c,0), n=arg(c,1), v=arg(c,2);   // note: length, then byte
+        if (guestValid(d,n)) memset(hptr(d), (int)v, n);
+        else compatLogFmt("arm32: %s OOB d=0x%x n=0x%x — skipped", name, d, n);
+        ret = d; return true;
+    }
     if (!strcmp(name, "memcmp")) {
         uint32_t a=arg(c,0), b=arg(c,1), n=arg(c,2);
         ret = (guestValid(a,n) && guestValid(b,n)) ? (uint32_t)memcmp(hptr(a), hptr(b), n) : 0;
