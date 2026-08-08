@@ -162,6 +162,27 @@ int main() {
     // sxtb: r1=0x80 → r0 = 0xffffff80
     { CpuState c = runT({0x2080 /*movs r0,#0x80*/, 0xb241 /*sxtb r1,r0*/, 0x4770}); check("thumb sxtb", c.r[1], 0xffffff80u); }
 
+    // ── ARM-mode barriers must retire, not load into PC ──
+    // dmb/dsb/isb/clrex sit in the unconditional space with Rn=Rd=r15, so the
+    // load/store decoder read them as `LDR pc,[pc,...]`. Each: <barrier> ;
+    // mov r0,#7 ; bx lr — r0 must be 7 and the CPU must not have halted.
+    { CpuState c = runProg((const uint32_t[]){0xf57ff05fu /*dmb sy*/, 0xe3a00007u, 0xe12fff1eu}, 3, false);
+      check("arm dmb sy falls through", c.r[0], 7); check("arm dmb no halt", c.halt?1:0, 0); }
+    { CpuState c = runProg((const uint32_t[]){0xf57ff05bu /*dmb ish*/, 0xe3a00007u, 0xe12fff1eu}, 3, false);
+      check("arm dmb ish falls through", c.r[0], 7); }
+    { CpuState c = runProg((const uint32_t[]){0xf57ff04fu /*dsb sy*/, 0xe3a00007u, 0xe12fff1eu}, 3, false);
+      check("arm dsb falls through", c.r[0], 7); }
+    { CpuState c = runProg((const uint32_t[]){0xf57ff06fu /*isb sy*/, 0xe3a00007u, 0xe12fff1eu}, 3, false);
+      check("arm isb falls through", c.r[0], 7); }
+    { CpuState c = runProg((const uint32_t[]){0xf57ff01fu /*clrex*/,  0xe3a00007u, 0xe12fff1eu}, 3, false);
+      check("arm clrex falls through", c.r[0], 7); }
+    { CpuState c = runProg((const uint32_t[]){0xf5d0f000u /*pld [r0]*/, 0xe3a00007u, 0xe12fff1eu}, 3, false);
+      check("arm pld falls through", c.r[0], 7); }
+    // A real LDR must still load — the barrier guard must not have eaten the
+    // load/store path. str r0,[sp,#16]; ldr r1,[sp,#16].
+    { CpuState c = runProg((const uint32_t[]){0xe3a0002au, 0xe58d0010u, 0xe59d1010u, 0xe12fff1eu}, 4, false);
+      check("arm ldr still works after guard", c.r[1], 42); }
+
     // ── Thumb-2 barriers must retire, not branch ──
     // cond=0b111x in the branch-and-misc-control space is not a condition, it
     // is the escape into miscellaneous control. Decoding it as B<cond>.W sent

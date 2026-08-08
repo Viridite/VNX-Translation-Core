@@ -595,6 +595,41 @@ static void stepArm(CpuState& c) {
         return;
     }
 
+    // Memory barriers — the ARM-mode twins of the Thumb-2 ones. Same trap,
+    // other decoder: `dmb sy` is 0xF57FF05F, whose Rn and Rd fields both read
+    // as r15, so the load/store decoder below took it for `LDR pc,[pc,...]`
+    // and loaded a word of whatever into PC. That is how ctor[417] — the one
+    // that builds Cocos2d-x's CCApplication singleton — ended up branching to
+    // 0x20 and being skipped, which left sharedApplication() asserting on
+    // every frame with nothing drawn.
+    if ((insn & 0xFFFFFF00) == 0xF57FF000) {
+        switch ((insn >> 4) & 0xF) {
+            case 0x1:                     // CLREX
+            case 0x4:                     // DSB
+            case 0x5:                     // DMB
+            case 0x6: return;             // ISB
+            default: break;
+        }
+    }
+    // PLD / PLDW / PLI — cache hints with no architectural effect, and nothing
+    // to prefetch into here. Masks verified against real encodings rather than
+    // derived from the manual's field table.
+    if ((insn & 0xFF30F000) == 0xF510F000 ||      // PLD/PLDW (immediate)
+        (insn & 0xFF70F000) == 0xF450F000) return; // PLI (immediate)
+
+    // Nothing else in the unconditional space is implemented — and it must not
+    // be allowed to fall through to the decoders below, which read cond=0b1111
+    // as an ordinary condition and will happily execute the word as a load, a
+    // store or an ALU op. Every bug this file has had in that space was of
+    // exactly that shape: not a missing instruction, but a wrong one silently
+    // performed. Halting names the gap instead of inventing behaviour.
+    if (cond == 0xF) {
+        if (cpuNoteUnimpl(insn))
+            compatLogFmt("arm32: UNIMPL unconditional-space insn=0x%08x pc=0x%x", insn, pc);
+        c.halt = true; c.halt_pc = pc;
+        return;
+    }
+
     // Branch / BL (cond 101)
     if ((insn & 0x0E000000) == 0x0A000000) {
         int32_t off = (int32_t)(insn << 8) >> 6;         // sign-extend imm24<<2

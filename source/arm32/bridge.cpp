@@ -903,6 +903,31 @@ static bool dispatch(CpuState& c, const char* name, uint32_t& ret) {
     }
     if (!strcmp(name,"malloc_usable_size")) { ret = 0; return true; }
 
+    // ── pthreads ──
+    // The interpreter runs the guest on one thread, so a lock is never
+    // contended and a broadcast has nobody to wake: 0 (success) is the honest
+    // answer, not a stub. Naming them also stops the log filling with UNIMPL
+    // lines for calls that were always going to be fine — 150+ in one run,
+    // noise that buries the faults that matter.
+    //
+    // Deliberately absent: pthread_create/join and the condvar waits. Those
+    // cannot be answered honestly without threads — returning from
+    // pthread_cond_wait would claim an event happened — so they stay
+    // unimplemented and keep saying so.
+    if (!strcmp(name,"pthread_mutex_lock")    || !strcmp(name,"pthread_mutex_unlock")  ||
+        !strcmp(name,"pthread_mutex_trylock") || !strcmp(name,"pthread_mutex_init")    ||
+        !strcmp(name,"pthread_mutex_destroy") ||
+        !strcmp(name,"pthread_mutexattr_init")|| !strcmp(name,"pthread_mutexattr_settype") ||
+        !strcmp(name,"pthread_mutexattr_destroy") ||
+        !strcmp(name,"pthread_cond_init")     || !strcmp(name,"pthread_cond_destroy")  ||
+        !strcmp(name,"pthread_cond_signal")   || !strcmp(name,"pthread_cond_broadcast")||
+        !strcmp(name,"pthread_rwlock_init")   || !strcmp(name,"pthread_rwlock_destroy")||
+        !strcmp(name,"pthread_rwlock_rdlock") || !strcmp(name,"pthread_rwlock_wrlock") ||
+        !strcmp(name,"pthread_rwlock_unlock")) {
+        ret = 0; return true;
+    }
+    if (!strcmp(name,"pthread_self")) { ret = 1; return true; }
+
     // ── stdio file I/O — guest FILE* is an index into s_files; paths resolve
     //    against the game's asset dir (logged, so runs reveal what's opened). ──
     if (!strcmp(name,"fopen")) {
