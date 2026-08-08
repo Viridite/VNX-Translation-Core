@@ -162,6 +162,74 @@ int main() {
     // sxtb: r1=0x80 → r0 = 0xffffff80
     { CpuState c = runT({0x2080 /*movs r0,#0x80*/, 0xb241 /*sxtb r1,r0*/, 0x4770}); check("thumb sxtb", c.r[1], 0xffffff80u); }
 
+    // ── VMOV between a core register pair and a double ──
+    // Round-trip: r0,r1 -> d0 -> r2,r3. These sit inside the VLDM encoding
+    // space and were being executed as a VLDM of eight doublewords from a
+    // computed address, so the handler for them was unreachable. Every double
+    // passed to or returned from a function goes through this.
+    { uint32_t p[] = { 0xe59f0010u /* ldr r0,[pc,#16] */,
+                       0xe59f1010u /* ldr r1,[pc,#16] */,
+                       0xec410b10u /* vmov d0, r0, r1 */,
+                       0xec532b10u /* vmov r2, r3, d0 */,
+                       0xe12fff1eu /* bx lr */,
+                       0x00000000u,
+                       0x11112222u /* -> r0 */,
+                       0x33334444u /* -> r1 */ };
+      CpuState c = runProg(p, 8, false);
+      check("vmov d0,r0,r1 -> r2 (lo)", c.r[2], 0x11112222u);
+      check("vmov d0,r0,r1 -> r3 (hi)", c.r[3], 0x33334444u); }
+    // A real VLDM must still work — the exclusion must not have broken it.
+    // Store two words at [sp], vldm them into d0, read back via vmov.
+    { uint32_t p[] = { 0xe59f0018u /* ldr r0,[pc,#24] */,
+                       0xe58d0000u /* str r0,[sp]     */,
+                       0xe59f0014u /* ldr r0,[pc,#20] */,
+                       0xe58d0004u /* str r0,[sp,#4]  */,
+                       0xe1a0000du /* mov r0,sp       */,
+                       0xec900b02u /* vldm r0, {d0}   */,
+                       0xec532b10u /* vmov r2,r3,d0   */,
+                       0xe12fff1eu /* bx lr */,
+                       0xaaaabbbbu, 0xccccddddu };
+      CpuState c = runProg(p, 10, false);
+      check("vldm still loads (lo)", c.r[2], 0xaaaabbbbu);
+      check("vldm still loads (hi)", c.r[3], 0xccccddddu); }
+
+    // ── NEON VLD1 single element to all lanes ──
+    // Store a known word at [r1], point r0 at it, splat it, then read the low
+    // and high halves of d0 back out through r0/r1 (vmov r0,r1,d0 = 0xec510b10).
+    // Both halves must be the element, i.e. genuinely replicated.
+    { uint32_t p[] = { 0xe59f0010u /* ldr r0,[pc,#16] -> the constant   */,
+                       0xe58d0000u /* str r0,[sp]                       */,
+                       0xe1a0000du /* mov r0,sp                         */,
+                       0xf4a00c8fu /* vld1.32 {d0[]},[r0]               */,
+                       0xec510b10u /* vmov r0,r1,d0                     */,
+                       0xe12fff1eu /* bx lr                             */,
+                       0xdeadbeefu /* <- literal loaded above           */ };
+      CpuState c = runProg(p, 7, false);
+      check("neon vld1.32 all-lanes lo", c.r[0], 0xdeadbeefu);
+      check("neon vld1.32 all-lanes hi", c.r[1], 0xdeadbeefu); }
+    // 16-bit element must fill all four lanes.
+    { uint32_t p[] = { 0xe59f0010u, 0xe58d0000u, 0xe1a0000du,
+                       0xf4a00c4fu /* vld1.16 {d0[]},[r0] */,
+                       0xec510b10u, 0xe12fff1eu, 0x0000beefu };
+      CpuState c = runProg(p, 7, false);
+      check("neon vld1.16 all-lanes lo", c.r[0], 0xbeefbeefu);
+      check("neon vld1.16 all-lanes hi", c.r[1], 0xbeefbeefu); }
+    // 8-bit element must fill all eight lanes.
+    { uint32_t p[] = { 0xe59f0010u, 0xe58d0000u, 0xe1a0000du,
+                       0xf4a00c0fu /* vld1.8 {d0[]},[r0] */,
+                       0xec510b10u, 0xe12fff1eu, 0x000000abu };
+      CpuState c = runProg(p, 7, false);
+      check("neon vld1.8 all-lanes lo", c.r[0], 0xababababu);
+      check("neon vld1.8 all-lanes hi", c.r[1], 0xababababu); }
+    // The two-register form must fill the second register too (d0 and d1).
+    { uint32_t p[] = { 0xe59f0014u, 0xe58d0000u, 0xe1a0000du,
+                       0xf4a00cbfu /* vld1.32 {d0[],d1[]},[r0] */,
+                       0xec510b11u /* vmov r0,r1,d1 — the SECOND reg */,
+                       0xe12fff1eu, 0x00000000u, 0xcafef00du };
+      CpuState c = runProg(p, 8, false);
+      check("neon vld1.32 all-lanes 2nd reg lo", c.r[0], 0xcafef00du);
+      check("neon vld1.32 all-lanes 2nd reg hi", c.r[1], 0xcafef00du); }
+
     // ── ARM-mode barriers must retire, not load into PC ──
     // dmb/dsb/isb/clrex sit in the unconditional space with Rn=Rd=r15, so the
     // load/store decoder read them as `LDR pc,[pc,...]`. Each: <barrier> ;

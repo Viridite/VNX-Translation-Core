@@ -24,6 +24,10 @@ namespace a32 {
 struct Import { std::string name; };
 static std::vector<Import> s_imports;
 
+// pthread TLS: key N (1-based) holds s_tls[N-1]. One guest thread, so there is
+// exactly one value per key and no per-thread indirection to model.
+static std::vector<uint32_t> s_tls;
+
 // Guest FILE* handle table: a guest "FILE*" is (index into s_files)+1, so 0 is
 // a clean NULL. gfile() maps a handle back to the host FILE*.
 static std::vector<FILE*> s_files;
@@ -927,6 +931,29 @@ static bool dispatch(CpuState& c, const char* name, uint32_t& ret) {
         ret = 0; return true;
     }
     if (!strcmp(name,"pthread_self")) { ret = 1; return true; }
+    // Thread-local storage. One thread means one slot per key, so a flat table
+    // is the whole implementation. Leaving these unimplemented was not neutral:
+    // pthread_getspecific fell through to the stub and returned 0, which reads
+    // as "nothing stored yet", so callers re-created state on every lookup or
+    // dereferenced null having just stored a perfectly good pointer.
+    if (!strcmp(name,"pthread_key_create")) {
+        s_tls.push_back(0);
+        const uint32_t key = (uint32_t)s_tls.size();       // 1-based, 0 stays invalid
+        if (arg(c,0) && guestValid(arg(c,0),4)) *(uint32_t*)toHost(arg(c,0)) = key;
+        ret = 0; return true;                              // destructor ignored: no thread exits
+    }
+    if (!strcmp(name,"pthread_key_delete")) { ret = 0; return true; }
+    if (!strcmp(name,"pthread_setspecific")) {
+        const uint32_t key = arg(c,0);
+        if (key && key <= s_tls.size()) s_tls[key-1] = arg(c,1);
+        else compatLogFmt("arm32: pthread_setspecific on unknown key %u — dropped", key);
+        ret = 0; return true;
+    }
+    if (!strcmp(name,"pthread_getspecific")) {
+        const uint32_t key = arg(c,0);
+        ret = (key && key <= s_tls.size()) ? s_tls[key-1] : 0;
+        return true;
+    }
 
     // ── stdio file I/O — guest FILE* is an index into s_files; paths resolve
     //    against the game's asset dir (logged, so runs reveal what's opened). ──

@@ -233,8 +233,17 @@ static bool execVFP(CpuState& c, uint32_t w) {
     if (cpn != 10 && cpn != 11) return false;
     bool dp = (cpn == 11);                        // double precision
 
-    // VLDR / VSTR / VLDM / VSTM (bits 27-25 == 110)
-    if ((w & 0x0E000000) == 0x0C000000) {
+    // VLDR / VSTR / VLDM / VSTM (bits 27-25 == 110).
+    //
+    // The 64-bit core<->extension moves (bits 27-21 == 1100 010) live inside
+    // this same 110 space, so they have to be excluded here or this branch
+    // eats them and returns true — which is exactly what happened, leaving the
+    // VMOV core-pair handler further down as unreachable dead code. The damage
+    // was not a missed move but a performed one: `vmov r0,r1,d0` came out as a
+    // VLDM of eight doublewords from r1-64, so reading a double back into core
+    // registers scribbled over eight VFP registers and returned nothing. Any
+    // function taking or returning a double is built on this.
+    if ((w & 0x0E000000) == 0x0C000000 && (w & 0x0FE00000) != 0x0C400000) {
         bool P=(w>>24)&1, U=(w>>23)&1, Wb=(w>>21)&1, L=(w>>20)&1;
         uint32_t rn=(w>>16)&0xF, vd=(w>>12)&0xF, imm8=w&0xFF;
         uint32_t D=(w>>22)&1;
@@ -411,6 +420,44 @@ static void execNeonLdSt(CpuState& c, uint32_t insn, uint32_t pc) {
     const uint32_t type = (insn >> 8)  & 0xF;
     const bool     load = (insn >> 21) & 1;
     const uint32_t vd   = ((insn >> 12) & 0xF) | (((insn >> 22) & 1) << 4);
+
+    // VLD1 "single element to all lanes" (type 0xC): read one element and
+    // splat it across every lane of one or two doubleword registers. Distinct
+    // from the multiple-element forms below — the size field selects how much
+    // is read, not just how alignment is checked, and only one element is
+    // transferred however many registers it fills. Cocos2d-x reaches this
+    // building the projection matrix in nativeInit, so halting here left the
+    // renderer initialised just far enough to clear the screen and draw
+    // nothing: the white screen.
+    if (type == 0xC && load) {
+        const uint32_t size = (insn >> 6) & 3;               // 0=8b 1=16b 2=32b
+        const uint32_t regs = ((insn >> 5) & 1) ? 2u : 1u;   // T
+        if (size <= 2) {
+            const uint32_t esz  = 1u << size;
+            const uint32_t addr = c.r[rn];
+            if (!guestValid(addr, esz)) {
+                compatLogFmt("arm32: NEON vld1-all-lanes of %u bytes at bad address 0x%x (pc=0x%x)",
+                             esz, addr, pc);
+                c.halt = true; c.halt_pc = pc;
+                return;
+            }
+            uint64_t elem = 0;
+            switch (size) {
+                case 0:  elem = *(const uint8_t*) toHost(addr); break;
+                case 1:  elem = *(const uint16_t*)toHost(addr); break;
+                default: elem = *(const uint32_t*)toHost(addr); break;
+            }
+            uint64_t rep = 0;
+            for (uint32_t b = 0; b < 8; b += esz) rep |= elem << (b * 8);
+            for (uint32_t i = 0; i < regs; i++) c.vfp[(vd + i) & 31] = rep;
+            // Write-back advances by one element here, not by the registers
+            // filled — only one element was ever read.
+            if      (rm == 15) { /* none */ }
+            else if (rm == 13) c.r[rn] = addr + esz;
+            else               c.r[rn] = addr + c.r[rm];
+            return;
+        }
+    }
 
     uint32_t nregs = 0;
     switch (type) {
