@@ -34,7 +34,9 @@ switch-mesa switch-glad switch-curl switch-mbedtls
 
 ## Status
 
-Only one game has ever actually been run against this engine — **Hill Climb Racing 1.67.0** (Fingersoft) — fully playable (touch, real audio, real threads, persistent saves, ~locked 60fps), with one known deterministic crash on the Shop/IAP screen (root-caused via `.eh_frame` unwind-table analysis: a generic `std::vector`-append helper handed an invalid reference by the game's own code when its IAP product list is empty — not yet patched, see the launcher repo's compatibility list for the full writeup).
+Only one game has ever actually been run against this engine — **Hill Climb Racing 1.67.0** (Fingersoft) — fully playable (touch, real audio, real threads, persistent saves, ~locked 60fps). Two deterministic crashes found via hardware testing and `.eh_frame` unwind-table analysis are patched, both signature-gated to this exact `libgame.so` build so a mismatched version is left untouched (see `source/compat/games/game_hillclimb.cpp`):
+- **Shop/IAP crash** — the Google-Play shop builder populates its product list from a store backend that doesn't exist here, leaving it empty, then unconditionally reads past the end of it. Fixed with three coordinated patches: `getMarketVariation()` claims Google Play so the builder takes a sane branch, the doomed populate call is NOP'd, and the empty-vector virtual-call is branched over. That last patch initially targeted the element-load instruction the disassembly pointed at, but hardware kept crashing one instruction later — there's at least one more code path into that block than static analysis found — so the fix instead patches the actual faulting instruction directly, covering every path into it regardless of how many there turn out to be.
+- **Racing null-deref crash** — a vehicle skin lookup (`SkinProvider::find`) returns null when the skin map is empty, and the caller dereferences it with no null check. Guarded to fall through to "no skin matched" instead.
 
 See the [launcher repo's README](https://github.com/Viridite/Viridite) for the full project history, changelog, roadmap, and game compatibility list.
 
