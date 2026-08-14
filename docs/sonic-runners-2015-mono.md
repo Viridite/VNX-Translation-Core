@@ -110,6 +110,74 @@ point that a network failure and an engine failure look identical from a
 black screen — worth confirming the client can actually reach a live server
 *before* spending time on any of the above, for the same reason.
 
+## Update: a real, working Mono-on-Switch port already exists
+
+This should have been checked before the "what's still not done" section
+below was originally written as if Mono-on-Switch were untried. It isn't.
+**Full credit to [exelix11](https://github.com/exelix11)** for
+[mono-nx](https://github.com/exelix11/mono-nx): a real, working, documented
+port of the Mono runtime to the devkitA64/libnx homebrew toolchain, running
+real .NET 9 DLLs/EXEs on real Switch hardware via Mono's interpreter (plus
+an AOT path). It's explicitly proof-of-concept quality and the author has
+paused active development, but it *works*, and — more valuably than the
+code itself — the author wrote up the actual engineering journey in
+[`notes/writeup.md`](https://github.com/exelix11/mono-nx/blob/master/notes/writeup.md),
+531 lines of exactly the kind of hard-won, specific findings this doc could
+only speculate about before.
+
+Two caveats before over-crediting this as a drop-in solution:
+
+1. mono-nx embeds a **modern Mono** (the Mono component inside
+   `dotnet/runtime`, via [the author's own libnx-patched fork](https://github.com/exelix11/dotnet_runtime/tree/libnx)),
+   not the old, standalone, Unity-specific Mono fork that Unity 4.6.9
+   actually embeds. It's the same lineage and proves the *category* of
+   problem is solvable, but it is not the same runtime Sonic Runners ships
+   — don't assume API/build-system compatibility without checking.
+2. The author is explicit that arbitrary P/Invoke doesn't work (only
+   statically-linked-in native entrypoints do — no `dlopen`), and that full
+   JIT (as opposed to interpreter-only) hits real, only-partially-solved
+   blockers. Relevant here because a real game's native interop surface
+   (however small — see the single-DllImport finding above) still needs
+   *some* story for calling into native code.
+
+### The single most valuable finding, and it's not Mono-specific at all
+
+Switch's actual JIT memory model is not simple W^X the way it is on most
+platforms (allocate RW, write code, flip to RX at the *same address*).
+Quoting the mechanism directly because it's exactly right and worth having
+verbatim: on the default modern-firmware backend (`JitType_CodeMemory`),
+**the RW and RX views of a JIT region are two different mapped addresses
+for the same underlying memory** (not classic same-address RWX, but not
+strictly the naive "swap protection bits" model either) — see
+[libnx's jit.c](https://github.com/switchbrew/libnx/blob/master/nx/source/kernel/jit.c)
+and the [Atmosphère kernel implementation](https://github.com/Atmosphere-NX/Atmosphere/blob/master/libraries/libmesosphere/source/svc/kern_svc_code_memory.cpp)
+that exelix11 dug into directly to confirm this, rather than guessing from
+higher-level docs.
+
+This is **directly relevant to this Core's own dynamic-code work**, not
+just to a hypothetical Mono path — `sonic-runners.md`'s own "D7/B2.10, cache
+maintenance" section already deals with writing patched instructions into
+a page before it's executable, which is exactly the class of problem this
+is. Worth reading `notes/writeup.md`'s "JIT? In my interpreter?" section in
+full before this Core does any new work in that area, rather than
+re-deriving the same lessons the hard way:
+
+- The two-view model breaks the common "allocate once, write, flip
+  protection" JIT idiom outright — code needs a codeman-style abstraction
+  that tracks separate RW/RX addresses for the same logical region, with
+  offset-preserving translation between them.
+- The kernel enforces a small, fixed limit on the number of live JIT code
+  regions (mono-nx hit exhaustion — error `0xce01` — after roughly 10
+  allocations using a naive "one region per chunk" strategy). One big
+  reserved region, filled incrementally, is the workaround mono-nx landed
+  on — worth designing for from the start rather than discovering this the
+  same way.
+- There's an unmap/remap trick to get a true single-address RW↔RX toggle
+  via raw `svcControlCodeMemory`, but it reintroduces a real correctness
+  hazard if any other thread might be executing code in that region while
+  it happens — genuinely needs a suspend-all-managed-threads story, not
+  something to reach for casually.
+
 ## What's still not done here
 
 No code changes. This is a corrected/extended research doc, the same as
@@ -121,7 +189,10 @@ from a sandbox with no APK, no hardware, and no Mono/Unity toolchain:
    anything above holds exactly.
 2. Confirm a Mono runtime can be embedded in the Core's process the way
    `unity-runtime` is scoped to embed IL2CPP — this is genuinely new
-   engineering, not a variant of existing `arm32`/`arm64` work.
+   engineering, not a variant of existing `arm32`/`arm64` work, though
+   mono-nx meaningfully de-risks it (real precedent it's possible at all)
+   and its codeman/JIT-memory findings above should save real debugging
+   time regardless of which Mono generation ends up used.
 3. Only then does "does the actual game logic just run" become testable —
    which, per the DllImport count above, is the more optimistic bet of the
    two Sonic Runners generations once the foundation exists.
