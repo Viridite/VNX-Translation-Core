@@ -108,6 +108,8 @@ string in the path that decides how a game is loaded.
 | [Subway Surfers](https://github.com/NaGaa95/subwaysurfers_nx) | 3.66.1 | — | `libmain.so` | Unity 2022.3 IL2CPP | `assets/bin/Data` |
 | [Geometry Dash](https://github.com/NaGaa95/gdash_nx) | 2.2.14x | — | `libcocos2dcpp.so` | cocos2d-x | `assets/`, `libfmod.so`, `cacert.pem` |
 | [Angry Birds 2](https://github.com/NaGaa95/angrybirds2_nx) | 26.4.3 | — | `libmain.so` | Unity IL2CPP | `assets/bin/Data` |
+| [Animal Crossing: Pocket Camp Complete](https://github.com/NaGaa95/acpc_nx) | 7.1.3 | — | `libmain.so` | Unity IL2CPP | `assets/bin/Data`, `libTone.so` |
+| [Max Payne Mobile](https://github.com/NaGaa95/max_nx_v2.1.131) | 2.1.131 | — | `libGame.so` | native | `.msf` sound, `x_*.ras`, `data/`, `es2/` |
 | [Cut the Rope](https://github.com/NaGaa95/ctr_nx) | 3.79.0 | — | `libctro.so` | native | `assets/`, `res/` |
 | [Cut the Rope 2](https://github.com/NaGaa95/ctr2_nx) | 1.47.1 | — | `libctr2.so` | native | `assets/`, `res/` |
 | [Jetpack Joyride](https://github.com/NaGaa95/jetpackjoyride_nx) | 1.104.1 | — | `libmortargame.so` | native | `assets/assets.zip` |
@@ -138,6 +140,10 @@ two are kept in separate tables.
 - **Online-only titles** — Genshin Impact and similar. Viridite's stated focus
   is games that don't require connectivity, and a title that cannot start
   without a live service can't be assessed here.
+- **Ports with no README yet** — `bully_nx` and `lbdcsh_nx` (LEGO Batman: DC
+  Super Heroes) are empty repositories at the time of writing. There is nothing
+  to transcribe, and a row invented from the game's name would be exactly the
+  guesswork this table is arranged to avoid. Worth revisiting when they land.
 - **Source engine games** — listed, but as `Unsupported`. A Source game is
   ~30 libraries whose entry point lives in the Java launcher rather than in any
   one of them, and the Android builds are themselves a port (nillerusr's)
