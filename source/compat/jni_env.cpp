@@ -434,9 +434,18 @@ static jobject dispatchObjectMethod(jobject recv, MethodEntry* e, va_list args) 
     if (!strcmp(m, "getClassLoader"))      return jmake(JCls::Generic);
     if (!strcmp(m, "getPackageName") || !strcmp(m, "getPackageCodePath"))
         return (jobject)jdup(packageName().c_str());
+    // getObbDir is its own answer now that expansion files are actually
+    // installed somewhere (see compat/obb.h). It used to fall in with the rest
+    // and report the data dir, which was harmless only for as long as no OBB
+    // ever arrived — a game that asked would have looked in the one directory
+    // its data was guaranteed not to be in.
+    if (!strcmp(m, "getObbDir")) {
+        const char* obbp = compatGet()->activity.obbPath;
+        return jmake(JCls::File, (obbp && *obbp) ? std::string(obbp) : dataDir());
+    }
     if (!strcmp(m, "getFilesDir") || !strcmp(m, "getCacheDir") ||
         !strcmp(m, "getExternalFilesDir") || !strcmp(m, "getExternalCacheDir") ||
-        !strcmp(m, "getObbDir") || !strcmp(m, "getDataDir"))
+        !strcmp(m, "getDataDir"))
         return jmake(JCls::File, dataDir());
     if (!strcmp(m, "getAbsolutePath") || !strcmp(m, "getPath") ||
         !strcmp(m, "getCanonicalPath"))

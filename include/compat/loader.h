@@ -223,6 +223,11 @@ void*        jniFindRegisteredNative(const char* name);
 // games are completely unaffected.
 void         jniSetUnityMode(bool on);
 
+// Tell the file shims where this game's expansion files (OBBs) were installed,
+// so a path a game hardcoded against Android's external storage resolves to
+// them. Set once per launch, before any game code runs. See compat/obb.h.
+void         compatSetObbDir(const char* dir, const char* pkg);
+
 // Release the Core's SDL2 EGL window surface so Unity can create its own on the
 // display window (see compatUnityReleaseWindow in loader.cpp). Returns the
 // shared EGLDisplay. Unity-path only.

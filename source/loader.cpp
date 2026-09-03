@@ -12,6 +12,8 @@ void loaderSetScreenOrient(int v) { g_screen_orient = v; }
 #include "compat/android.h"
 #include "compat/sha256.h"
 #include "compat/gamedb.h"
+#include "compat/obb.h"
+#include "compat/jnisym.h"
 #include "build_number.h"
 #include "unity/unity_runtime.h"   // VNX-Unity-Runtime submodule
 #include "arm32/arm32.h"           // ARM32 emulation layer (armeabi-v7a games)
@@ -58,6 +60,7 @@ extern volatile uint64_t g_recover_x8;
 // Persistent path storage — launchApk stores these so ANativeActivity pointers
 // remain valid after launchApk returns (for runGameOnMainThread).
 static std::string g_base_dir_stored;
+static std::string g_obb_dir_stored;
 static std::string g_apk_path_stored;
 
 // Per-APK framerate cap (0 = uncapped/default), set by the launcher's Manage
@@ -365,6 +368,25 @@ static bool extractApk(const std::string& apk_path, const std::string& dest_dir,
             size_t p = 0;
             while ((p = rel.find('/', p)) != std::string::npos) {
                 mkdirp(dest_dir + "/assets/" + rel.substr(0, p));
+                p++;
+            }
+            extractEntry(zf, dest);
+
+        } else if (n.rfind("res/", 0) == 0 && n.back() != '/') {
+            // res/ used to be dropped on the floor, on the reasoning that an
+            // NDK game's data lives in assets/. That holds for Hill Climb
+            // Racing and not for others: Cut the Rope keeps art there, the
+            // Square Enix titles keep their intro movies in res/raw, and
+            // Swordigo keeps its music there. It is small next to assets/ —
+            // Android resources, not game data — so extracting it costs
+            // little and stops those games looking for files that were thrown
+            // away during install.
+            std::string rel  = n.substr(4);
+            std::string dest = dest_dir + "/res/" + rel;
+            mkdirp(dest_dir + "/res/");
+            size_t p = 0;
+            while ((p = rel.find('/', p)) != std::string::npos) {
+                mkdirp(dest_dir + "/res/" + rel.substr(0, p));
                 p++;
             }
             extractEntry(zf, dest);
@@ -969,6 +991,60 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
         compatLog("Already installed — skipping extraction");
     }
 
+    // ── 2b. Expansion files (OBB) ───────────────────────────────────────────
+    // An APK is capped at 100MB on Google Play, so a large game keeps its data
+    // in an OBB beside the APK. Copying only the .apk meant every such title
+    // could do nothing but fail on its first asset read, with the data never
+    // having been on the Switch at all — most of the Square Enix catalogue,
+    // GTA: San Andreas, Castle of Illusion, After Burner Climax, KH Union χ.
+    //
+    // These are not unpacked, because Android does not unpack them: the game
+    // is handed a path and reads the OBB itself. Unpacking would double the
+    // space a 2GB title needs and hand games a layout they never expect.
+    {
+        const std::string obb_dir = obb::dirFor(base_dir);
+        std::vector<obb::File> obbs = obb::find(apk_path, pkg_name);
+        if (!obbs.empty()) {
+            compatUiLog("Installing expansion files...");
+            if (cb) cb("Installing expansion files", "Copying OBB data...");
+            for (const obb::File& f : obbs)
+                compatLogFmt("obb: found %s (%s)", f.canonicalName.c_str(), f.path.c_str());
+            int n = obb::install(obbs, obb_dir);
+            if (n < 0)
+                compatLogFmt("obb: could not create %s — the game will not find its data",
+                             obb_dir.c_str());
+            else
+                compatLogFmt("obb: %d of %zu in place at %s", n, obbs.size(), obb_dir.c_str());
+        } else {
+            compatLog("obb: none found beside the APK");
+        }
+        // Set regardless: a game that asks where its OBBs are should be told
+        // the same directory whether or not anything was put there, and the
+        // fopen shim needs it to resolve a hardcoded Android path.
+        compatSetObbDir(obb_dir.c_str(), pkg_name.c_str());
+
+        // A title whose data lives in an OBB beside the APK cannot start
+        // without it — it will load, link, run its constructors and then fail
+        // on a file read somewhere deep in its own asset code, which reads as
+        // a Viridite bug rather than as a missing download. Say which file is
+        // missing and where it goes, while that is still cheap to say.
+        //
+        // The deep test is exempt: it loads a game without running it, which
+        // is exactly the case where the data legitimately isn't there yet.
+        const gamedb::Title* t = gamedb::findByPackage(pkg_name.c_str());
+        if (t && t->needsObb && obbs.empty() && !elfIsDryRun()) {
+            compatLogFmt("obb: %s keeps its game data in an expansion file and none "
+                         "was found — refusing to load into a certain failure", t->name);
+            result.errorStage  = "Expansion file missing";
+            result.errorDetail = std::string(t->name) + " needs its .obb expansion file "
+                                 "next to the APK (in Android/obb/" + pkg_name +
+                                 "/, a folder named for the package, or beside the APK "
+                                 "itself). The APK alone does not contain the game data.";
+            if (g_compat_log) { logFlushDedup(); fclose(g_compat_log); g_compat_log = nullptr; }
+            return result;
+        }
+    }
+
     // Applied every launch (fresh or cached) so it's always current.
     applyGamePatches(pkg_name, asset_dir);
 
@@ -1257,6 +1333,10 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
     act->clazz            = (void*)0x4001;
     act->internalDataPath = g_base_dir_stored.c_str();
     act->externalDataPath = g_base_dir_stored.c_str();
+    // Where this game's expansion files were installed (see step 2b). Games
+    // reach these either through the activity or through getObbDir().
+    g_obb_dir_stored      = obb::dirFor(base_dir);
+    act->obbPath          = g_obb_dir_stored.c_str();
     act->sdkVersion       = 26;
     act->instance         = nullptr;
     act->window           = nwin;
@@ -1869,9 +1949,56 @@ void runGameOnMainThread(void* game_so_ptr,
     compatLog("No NativeActivity — Cocos2d-x direct Java_ path");
     compatLogFlush();
 
+    // Find one of cocos2d-x's engine entry points.
+    //
+    // This used to be a single findSym on the stock name,
+    // Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeRender. That is what Hill
+    // Climb Racing exports, so it worked — and it is why a game could be
+    // plainly cocos2d-x, load and link with nothing unresolved, and then sit
+    // there with no render loop: the same engine compiled under the game's own
+    // package exports a differently-spelled symbol, and the lookup came back
+    // empty with nothing to say about it. Four answers, in order:
+    //
+    //   1. the stock org.cocos2dx.lib name — unchanged, so HCR resolves
+    //      exactly as before and cannot regress,
+    //   2. the org.cocos2dx.cpp spelling, the other one in common use,
+    //   3. any exported Java_ symbol whose class and method match, whatever
+    //      package it was built into (see compat/jnisym.h for the mangling),
+    //   4. the JNI registration table, for a game that registers its natives
+    //      through JNI_OnLoad instead of exporting them.
+    auto findCocosSym = [&](const char* cls, const char* method) -> void* {
+        char buf[256];
+        snprintf(buf, sizeof(buf), "Java_org_cocos2dx_lib_%s_%s", cls, method);
+        if (void* p = so->findSym(buf)) return p;
+        snprintf(buf, sizeof(buf), "Java_org_cocos2dx_cpp_%s_%s", cls, method);
+        if (void* p = so->findSym(buf)) {
+            compatLogFmt("cocos2d-x: %s.%s found under org.cocos2dx.cpp", cls, method);
+            return p;
+        }
+        if (so->symtab && so->strtab) {
+            for (uint32_t i = 1; i < so->sym_count; i++) {
+                const Elf64_Sym& sy = so->symtab[i];
+                if (sy.st_shndx == SHN_UNDEF || sy.st_value == 0) continue;
+                if (so->strsz > 0 && (uint64_t)sy.st_name >= so->strsz) continue;
+                if (so->alloc_size > 0 && sy.st_value >= so->alloc_size) continue;
+                const char* sname = so->strtab + sy.st_name;
+                if (!jnisym::matches(sname, cls, method)) continue;
+                compatLogFmt("cocos2d-x: %s.%s exported as %s (repackaged engine)",
+                             cls, method, sname);
+                return (void*)((uint8_t*)so->base + sy.st_value);
+            }
+        }
+        if (void* p = jniFindRegisteredNative(method)) {
+            compatLogFmt("cocos2d-x: %s.%s came from RegisterNatives, not an export",
+                         cls, method);
+            return p;
+        }
+        compatLogFmt("cocos2d-x: %s.%s not found by any spelling", cls, method);
+        return nullptr;
+    };
+
     typedef void (*SetPaths_fn)(JNIEnv*, jobject, jstring, jstring);
-    SetPaths_fn setPaths = (SetPaths_fn)so->findSym(
-        "Java_org_cocos2dx_lib_Cocos2dxActivity_nativeSetPaths");
+    SetPaths_fn setPaths = (SetPaths_fn)findCocosSym("Cocos2dxActivity", "nativeSetPaths");
     if (setPaths) {
         compatLogFmt("Cocos2d-x: nativeSetPaths @%p", (void*)setPaths);
         g_recover_owner = threadGetSelf(); g_in_recover = true; g_recover_sig = 0; g_recover_esr = 0; g_recover_far = 0;
@@ -1894,11 +2021,9 @@ void runGameOnMainThread(void* game_so_ptr,
     }
 
     typedef void (*NativeInit_fn)(JNIEnv*, jobject, jint, jint);
-    NativeInit_fn nativeInit = (NativeInit_fn)so->findSym(
-        "Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeInit");
+    NativeInit_fn nativeInit = (NativeInit_fn)findCocosSym("Cocos2dxRenderer", "nativeInit");
     if (!nativeInit)
-        nativeInit = (NativeInit_fn)so->findSym(
-            "Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeResize");
+        nativeInit = (NativeInit_fn)findCocosSym("Cocos2dxRenderer", "nativeResize");
     if (nativeInit) {
         compatLogFmt("Cocos2d-x: nativeInit @%p 1280x720", (void*)nativeInit);
         g_recover_owner = threadGetSelf(); g_in_recover = true; g_recover_sig = 0; g_recover_esr = 0; g_recover_far = 0;
@@ -1921,8 +2046,7 @@ void runGameOnMainThread(void* game_so_ptr,
     }
 
     typedef void (*NativeRender_fn)(JNIEnv*, jobject);
-    NativeRender_fn nativeRender = (NativeRender_fn)so->findSym(
-        "Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeRender");
+    NativeRender_fn nativeRender = (NativeRender_fn)findCocosSym("Cocos2dxRenderer", "nativeRender");
 
     // SDL reports fingers in 0..1 of the physical panel. The game thinks it is
     // on a screen the size of the content rect, so a tap has to be moved into
@@ -1944,14 +2068,10 @@ void runGameOnMainThread(void* game_so_ptr,
     typedef void     (*TouchBE_fn)(JNIEnv*, jobject, jint, jfloat, jfloat);
     typedef void     (*TouchArr_fn)(JNIEnv*, jobject, void*, void*, void*);
     typedef jboolean (*KeyDown_fn)(JNIEnv*, jobject, jint);
-    TouchBE_fn  touchBegin = (TouchBE_fn)so->findSym(
-        "Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeTouchesBegin");
-    TouchBE_fn  touchEnd = (TouchBE_fn)so->findSym(
-        "Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeTouchesEnd");
-    TouchArr_fn touchMove = (TouchArr_fn)so->findSym(
-        "Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeTouchesMove");
-    KeyDown_fn  keyDown = (KeyDown_fn)so->findSym(
-        "Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeKeyDown");
+    TouchBE_fn  touchBegin = (TouchBE_fn)findCocosSym("Cocos2dxRenderer", "nativeTouchesBegin");
+    TouchBE_fn  touchEnd = (TouchBE_fn)findCocosSym("Cocos2dxRenderer", "nativeTouchesEnd");
+    TouchArr_fn touchMove = (TouchArr_fn)findCocosSym("Cocos2dxRenderer", "nativeTouchesMove");
+    KeyDown_fn  keyDown = (KeyDown_fn)findCocosSym("Cocos2dxRenderer", "nativeKeyDown");
     compatLogFmt("touch: begin=%p end=%p move=%p keyDown=%p",
                  (void*)touchBegin, (void*)touchEnd, (void*)touchMove, (void*)keyDown);
 

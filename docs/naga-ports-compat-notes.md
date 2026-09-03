@@ -150,6 +150,31 @@ two are kept in separate tables.
   rather than a stock NDK game. They are in the table so they are recognised
   and refused with a reason, not loaded until something faults.
 
+## What has been built since
+
+The first pass recorded what each title needs. These are the parts of "needs"
+the Core can now actually satisfy:
+
+- **Expansion files.** OBBs are found beside the APK, installed, exposed
+  through `getObbDir()`/`obbPath`, and reachable at the external-storage paths
+  a game may have hardcoded. Not unpacked — Android doesn't unpack them either.
+  A title that needs one and hasn't got one is refused by name instead of
+  failing later in its own asset code. This was the blocker for KH Union χ,
+  GTA: San Andreas, Castle of Illusion and After Burner Climax, and it did not
+  exist at all before: `obbPath` was a struct field with nothing behind it.
+- **`res/` is extracted.** It used to be discarded. Cut the Rope keeps art
+  there, the Square Enix ports keep intro movies in `res/raw`, Swordigo keeps
+  its music there.
+- **Entry points are found by class and method, not by one exact string.** A
+  cocos2d-x game that ships the engine under its own package used to load
+  perfectly and then have no render loop. Four spellings are tried now,
+  including the JNI registration table for engines that register rather than
+  export.
+- **The entry library is chosen, not guessed by size** (see above).
+
+All of it is host-tested — `test/obb/`, `test/jnisym/`, `test/gamedb/` — because
+every title it exists for is one nobody here has an APK for.
+
 ## What still needs hardware
 
 Everything that would make one of these rows say `Playable`. The bar is

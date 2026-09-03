@@ -2,6 +2,7 @@
 #include "compat/orientation.h"
 #include "compat/android.h"
 #include "compat/sensors.h"
+#include "compat/obb.h"
 #include <switch.h>
 #include <GLES2/gl2.h>
 #include <GLES3/gl3.h>
@@ -756,8 +757,33 @@ static ssize_t sh_write(int fd, const void* buf, size_t n) {
     return write(fd, buf, n);
 }
 
+// ─── Expansion files ─────────────────────────────────────────────────────────
+// Where this game's OBBs were installed, and which package they belong to. A
+// game that hardcodes /sdcard/Android/obb/<pkg>/main.<ver>.<pkg>.obb — plenty
+// do, rather than calling getObbDir() — would otherwise open nothing and
+// report its own data as missing.
+static std::string g_obb_dir;
+static std::string g_obb_pkg;
+void compatSetObbDir(const char* dir, const char* pkg) {
+    g_obb_dir = dir ? dir : "";
+    g_obb_pkg = pkg ? pkg : "";
+}
+// Returns the rewritten path, or an empty string to leave the call alone.
+static std::string obbRemap(const char* path) {
+    if (!path || g_obb_dir.empty()) return "";
+    return obb::remapPath(path, g_obb_pkg, g_obb_dir);
+}
+
 // fopen wrapper — logs failed opens so we can see what paths game code requests
 static FILE* stub_fopen(const char* path, const char* mode) {
+    if (std::string mapped = obbRemap(path); !mapped.empty()) {
+        FILE* mf = fopen(mapped.c_str(), mode);
+        compatLogFmt("obb: fopen %s -> %s (%s)", path, mapped.c_str(),
+                     mf ? "ok" : "still not there");
+        if (mf) { setvbuf(mf, nullptr, _IOFBF, 64 * 1024); return mf; }
+        // Fall through: if the remap missed, the original path deserves its own
+        // failure line rather than being swallowed by ours.
+    }
     FILE* f = fopen(path, mode);
     if (!f) { compatLogFmt("fopen FAIL: %s (mode=%s)", path ? path : "?", mode ? mode : "?"); return f; }
     // Default newlib stdio buffer is small (~1KB), so reading a single
@@ -774,6 +800,11 @@ static FILE* stub_fopen(const char* path, const char* mode) {
 static int stub_open(const char* path, int flags, ...) {
     int vfd = devUrandomOpen(path);
     if (vfd >= 0) return vfd;
+    if (std::string mapped = obbRemap(path); !mapped.empty()) {
+        int mfd = open(mapped.c_str(), flags);
+        compatLogFmt("obb: open %s -> %s (fd=%d)", path, mapped.c_str(), mfd);
+        if (mfd >= 0) return mfd;
+    }
     int fd = open(path, flags);
     if (fd < 0) compatLogFmt("open FAIL: %s flags=0x%x", path ? path : "?", flags);
     else        compatLogFmt("open OK:   %s flags=0x%x fd=%d", path ? path : "?", flags, fd);

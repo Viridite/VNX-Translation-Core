@@ -38,6 +38,22 @@ Only one game has ever actually been run against this engine — **Hill Climb Ra
 - **Shop/IAP crash** — the Google-Play shop builder populates its product list from a store backend that doesn't exist here, leaving it empty, then unconditionally reads past the end of it. Fixed with three coordinated patches: `getMarketVariation()` claims Google Play so the builder takes a sane branch, the doomed populate call is NOP'd, and the empty-vector virtual-call is branched over. That last patch initially targeted the element-load instruction the disassembly pointed at, but hardware kept crashing one instruction later — there's at least one more code path into that block than static analysis found — so the fix instead patches the actual faulting instruction directly, covering every path into it regardless of how many there turn out to be.
 - **Racing null-deref crash** — a vehicle skin lookup (`SkinProvider::find`) returns null when the skin map is empty, and the caller dereferences it with no null check. Guarded to fall through to "no skin matched" instead.
 
+## Expansion files (OBB)
+
+Google Play caps an APK at 100MB, so a large game ships its data beside the APK in an expansion file — `main.<version>.<package>.obb`, living at `Android/obb/<package>/` on the device. Viridite copied the APK and nothing else, which meant every such title could only ever fail on its first asset read: the data had never been on the Switch. That is most of the Square Enix catalogue, GTA: San Andreas, Castle of Illusion, After Burner Climax and Kingdom Hearts Union χ.
+
+`source/compat/obb.cpp` finds them (the Android tree copied off a phone, a folder named for the package or the APK, an `obb/` subfolder, or loose beside the APK), installs them under their canonical names, points `getObbDir()` and `ANativeActivity.obbPath` at them, and rewrites the external-storage paths a game may have baked in (`/sdcard/Android/obb/<pkg>/…`) so they resolve. It does **not** unpack them — Android doesn't either; the game is handed a path and reads the OBB itself, usually as a zip.
+
+A title the database marks as keeping its data in an OBB, launched without one, is now refused with the name of the file it wants and where to put it, rather than loading into a fault in its own asset code several hundred frames later.
+
+`res/` is extracted from the APK now as well. It used to be dropped on the reasoning that an NDK game's data is in `assets/` — true for Hill Climb Racing, not for Cut the Rope's art, the Square Enix intro movies in `res/raw`, or Swordigo's music.
+
+## Finding a game's entry points
+
+A cocos2d-x game exports its engine hooks as JNI long names — `Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeRender`. The Core looked for exactly that string, which is what Hill Climb Racing exports and what stock cocos2d-x produces. A game that ships the engine under its own package exports a different spelling, so it could load, link with nothing unresolved, and then have no render loop and nothing in the log explaining why.
+
+Entry points now resolve in four steps — the stock name, the `org.cocos2dx.cpp` spelling, any exported `Java_` symbol whose class and method match whatever the package (`include/compat/jnisym.h` handles the mangling, including `_1`-escaped underscores and `__signature` overloads), and finally the JNI registration table for a game that registers natives through `JNI_OnLoad` instead of exporting them. The stock name is tried first, so Hill Climb Racing resolves exactly as it did.
+
 ## Knowing a title before loading it
 
 `include/compat/gamedb.h` holds what is known about each Android title this Core can be pointed at: its engine, **which of its libraries is actually the game**, and what data it needs beyond its APK — all kept strictly apart from whether it runs here (one title does; see Status above).
@@ -48,6 +64,8 @@ The load-path consequence is which library gets entered. "The largest `.so` is t
 
 ```
 g++ -std=c++17 -I include test/gamedb/harness.cpp -o /tmp/gamedbtest && /tmp/gamedbtest
+g++ -std=c++17 -I include test/obb/harness.cpp source/compat/obb.cpp -o /tmp/obbtest && /tmp/obbtest
+g++ -std=c++17 -I include test/jnisym/harness.cpp -o /tmp/jnisymtest && /tmp/jnisymtest
 ```
 
 The file is header-only and dependency-free because the launcher carries a byte-identical copy at `Viridite/include/gamedb.h` — the two must never disagree about a title, so keeping them in step is a file copy rather than a merge.
