@@ -11,6 +11,7 @@ static int g_screen_orient = -1;
 void loaderSetScreenOrient(int v) { g_screen_orient = v; }
 #include "compat/android.h"
 #include "compat/sha256.h"
+#include "compat/gamedb.h"
 #include "build_number.h"
 #include "unity/unity_runtime.h"   // VNX-Unity-Runtime submodule
 #include "arm32/arm32.h"           // ARM32 emulation layer (armeabi-v7a games)
@@ -1069,8 +1070,52 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
     else
         compatLog("engine: cocos2d-x / generic NDK path");
 
-    // Main SO is largest (last in smallest-first vector)
-    const std::string& main_so = all_sos.back().second;
+    // What is known about this title, if anything. Nothing here changes whether
+    // a game runs — it decides which library gets entered, and it puts what is
+    // known into the log before the load rather than leaving a failure to be
+    // read backwards from a fault address.
+    const gamedb::Title* title = gamedb::findByPackage(pkg_name.c_str());
+    if (title) {
+        compatLogFmt("title: %s (%s) — %s, %s",
+                     title->name, title->version,
+                     gamedb::engineName(title->engine),
+                     gamedb::supportTag(title->support));
+        if (title->extraData)
+            compatLogFmt("title: needs beyond the APK: %s", title->extraData);
+        if (title->support == gamedb::Support::Unsupported)
+            compatLogFmt("title: %s is not a shape this Core can drive — expect "
+                         "this load to stop early", gamedb::engineName(title->engine));
+    } else {
+        compatLogFmt("title: no database entry for %s — loading on the generic path",
+                     pkg_name.empty() ? "(unknown package)" : pkg_name.c_str());
+    }
+
+    // ── Which library is the game ───────────────────────────────────────────
+    // "The largest .so" is right for a game shipping one big binary and a few
+    // small helpers, and wrong for plenty of others: a Unity game's largest
+    // library is libil2cpp.so while the entry point is libmain.so, and a game
+    // shipping FMOD Studio can easily have its audio backend outweigh it. The
+    // rules, and which one answered, are in compat/gamedb.h — host-tested in
+    // test/gamedb/harness.cpp, because this is exactly the decision that cannot
+    // be checked on hardware without owning every APK in the table.
+    std::vector<std::string> so_names(all_sos.size());   // basenames, parallel to all_sos
+    std::vector<const char*> so_name_ptrs(all_sos.size());
+    std::vector<size_t>      so_sizes(all_sos.size());
+    for (size_t i = 0; i < all_sos.size(); i++) {
+        const std::string& path = all_sos[i].second;
+        size_t sl = path.rfind('/');
+        so_names[i]     = (sl == std::string::npos) ? path : path.substr(sl + 1);
+        so_name_ptrs[i] = so_names[i].c_str();
+        so_sizes[i]     = all_sos[i].first;
+    }
+    const char* entry_why = nullptr;
+    int entry_idx = gamedb::chooseEntrySo(pkg_name.c_str(), so_name_ptrs.data(),
+                                          so_sizes.data(), so_name_ptrs.size(),
+                                          &entry_why);
+    if (entry_idx < 0) entry_idx = (int)all_sos.size() - 1;   // unreachable: the set is non-empty
+    const std::string& main_so = all_sos[entry_idx].second;
+    compatLogFmt("engine: entering %s — %s", so_names[entry_idx].c_str(),
+                 entry_why ? entry_why : "largest library");
 
     // ── 4. Set up JNI ───────────────────────────────────────────────────────
     compatUiLog("Setting up JNI stubs...");

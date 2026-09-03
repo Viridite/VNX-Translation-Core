@@ -1,17 +1,17 @@
 // ─── Hill Climb Racing (com.fingersoft.hillclimb) — Cocos2d-x ───────────────
-// All HCR-specific fixups live here, keyed by package + soname, so they can
-// never fire for another title (e.g. the Unity path). Everything is
+// All HCR-specific fixups live here. game_registry.cpp decides (by package and
+// library name) that a load is this game before calling in, so nothing here can
+// fire for another title — e.g. the Unity path. Everything is additionally
 // signature-gated against this exact libgame.so (v1.67.0,
-// sha256 542c25e5…c07b150a) so a mismatched build is left untouched.
+// sha256 542c25e5…c07b150a), so even a differently-built Hill Climb Racing is
+// left untouched rather than patched at addresses that mean something else.
 #include "compat/games.h"
 #include "compat/loader.h"
 #include <cstring>
 
 namespace {
 
-constexpr char   kPkg[]   = "com.fingersoft.hillclimb";
-constexpr char   kSoName[] = "libgame.so";
-constexpr uint32_t kNop   = 0xd503201f;
+constexpr uint32_t kNop = 0xd503201f;
 
 bool inRange(uint64_t vaddr, uint64_t min_vaddr, size_t alloc_size) {
     return vaddr >= min_vaddr && vaddr + 4 <= min_vaddr + alloc_size;
@@ -139,24 +139,15 @@ void patchControllerNames(uint8_t* base, uint64_t min_vaddr, size_t alloc_size) 
 
 }  // namespace
 
-// ─── Registry entry points ──────────────────────────────────────────────────
-// (The dispatcher lives here while HCR is the only title with quirks; add a
-//  game_<title>.cpp and route to it here when another game needs fixups.)
+// ─── Entry point ────────────────────────────────────────────────────────────
+// Called only from the dispatcher in game_registry.cpp, which has already
+// established that this is Hill Climb Racing's libgame.so.
 
-void gameApplyQuirks(const char* pkg, const char* soname,
-                     uint8_t* stage_base, uint64_t min_vaddr, size_t alloc_size) {
-    const bool isHcr = (pkg && strcmp(pkg, kPkg) == 0) ||
-                       (soname && strcmp(soname, kSoName) == 0);
-    if (isHcr && soname && strcmp(soname, kSoName) == 0) {
-        patchShopPopulate(stage_base, min_vaddr, alloc_size);
-        patchSkinLookupGuard(stage_base, min_vaddr, alloc_size);
-        patchShopItemVirtualCall(stage_base, min_vaddr, alloc_size);
-        patchControllerNames(stage_base, min_vaddr, alloc_size);
-    }
-}
-
-int gameMarketVariation(const char* pkg) {
-    if (pkg && strcmp(pkg, kPkg) == 0)
-        return 1;   // claim Google Play so the shop builder takes a sane branch
-    return -1;       // no opinion — caller keeps its own default
+void hcrApplyQuirks(const char* soname, uint8_t* stage_base,
+                    uint64_t min_vaddr, size_t alloc_size) {
+    (void)soname;
+    patchShopPopulate(stage_base, min_vaddr, alloc_size);
+    patchSkinLookupGuard(stage_base, min_vaddr, alloc_size);
+    patchShopItemVirtualCall(stage_base, min_vaddr, alloc_size);
+    patchControllerNames(stage_base, min_vaddr, alloc_size);
 }

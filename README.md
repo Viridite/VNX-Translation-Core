@@ -38,6 +38,20 @@ Only one game has ever actually been run against this engine — **Hill Climb Ra
 - **Shop/IAP crash** — the Google-Play shop builder populates its product list from a store backend that doesn't exist here, leaving it empty, then unconditionally reads past the end of it. Fixed with three coordinated patches: `getMarketVariation()` claims Google Play so the builder takes a sane branch, the doomed populate call is NOP'd, and the empty-vector virtual-call is branched over. That last patch initially targeted the element-load instruction the disassembly pointed at, but hardware kept crashing one instruction later — there's at least one more code path into that block than static analysis found — so the fix instead patches the actual faulting instruction directly, covering every path into it regardless of how many there turn out to be.
 - **Racing null-deref crash** — a vehicle skin lookup (`SkinProvider::find`) returns null when the skin map is empty, and the caller dereferences it with no null check. Guarded to fall through to "no skin matched" instead.
 
+## Knowing a title before loading it
+
+`include/compat/gamedb.h` holds what is known about each Android title this Core can be pointed at: its engine, **which of its libraries is actually the game**, and what data it needs beyond its APK — all kept strictly apart from whether it runs here (one title does; see Status above).
+
+Most of it is transcribed from the READMEs of [NaGaa95](https://github.com/NaGaa95)'s independent Switch ports, credited per row — their ports name, per title, the two things an APK's own metadata never tells you. See [docs/naga-ports-compat-notes.md](docs/naga-ports-compat-notes.md) for the full table and provenance.
+
+The load-path consequence is which library gets entered. "The largest `.so` is the game" is right for a game shipping one big binary and a few helpers, and wrong for a Unity title (largest is `libil2cpp.so`; the entry point is `libmain.so`) or one shipping FMOD Studio. The rule is now: the title's documented entry library → the largest library whose *name* is a known engine entry point → the largest that isn't a known dependency → the largest. The answer and the rule that gave it go in `compat_log.txt`; the rules are host-tested in [`test/gamedb/harness.cpp`](test/gamedb/harness.cpp):
+
+```
+g++ -std=c++17 -I include test/gamedb/harness.cpp -o /tmp/gamedbtest && /tmp/gamedbtest
+```
+
+The file is header-only and dependency-free because the launcher carries a byte-identical copy at `Viridite/include/gamedb.h` — the two must never disagree about a title, so keeping them in step is a file copy rather than a merge.
+
 See the [launcher repo's README](https://github.com/Viridite/Viridite) for the full project history, changelog, roadmap, and game compatibility list.
 
 ## License
