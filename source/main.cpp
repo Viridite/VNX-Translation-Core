@@ -20,6 +20,7 @@
 #include "compat/bootfade.h"
 #include "compat/reveal.h"
 #include "compat/achievements.h"
+#include "compat/sensors.h"
 #include "arm32/arm32.h"
 #include "build_number.h"
 #include "avatar.h"
@@ -407,6 +408,7 @@ struct App {
         if (joy)  SDL_JoystickClose(joy);
         if (rdr)  SDL_DestroyRenderer(rdr);
         if (win)  SDL_DestroyWindow(win);
+        sensorsShutdown();   // console IMU must be finalized before hidExit
         socketExit();
         romfsExit(); plExit();
         TTF_Quit(); IMG_Quit(); SDL_Quit();

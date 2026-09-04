@@ -6,6 +6,12 @@
 // Declared with generic pointer types here so shim_table.cpp can reference
 // them without needing the full ASensorEvent/etc. struct definitions (those
 // live in sensors.cpp, matching Android's exact real ABI layout internally).
+// Release the console's SevenSixAxisSensor if it was ever started. libnx
+// requires it to be finalized before hidExit, and it is process-wide rather
+// than per-queue, so this is called once on the way out rather than when a
+// game's event queue goes away.
+void sensorsShutdown(void);
+
 extern "C" {
 void* ASensorManager_getInstance(void);
 void* ASensorManager_getInstanceForPackage(const char* packageName);

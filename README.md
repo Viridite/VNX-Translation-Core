@@ -54,6 +54,14 @@ A cocos2d-x game exports its engine hooks as JNI long names — `Java_org_cocos2
 
 Entry points now resolve in four steps — the stock name, the `org.cocos2dx.cpp` spelling, any exported `Java_` symbol whose class and method match whatever the package (`include/compat/jnisym.h` handles the mangling, including `_1`-escaped underscores and `__signature` overloads), and finally the JNI registration table for a game that registers natives through `JNI_OnLoad` instead of exporting them. The stock name is tried first, so Hill Climb Racing resolves exactly as it did.
 
+## Motion sensors
+
+`ASensorManager`/`ASensorEventQueue` are implemented against the real NDK ABI and backed by a Switch six-axis sensor. Which one is no longer a single answer: acquisition walks the handheld Joy-Cons, then every connected pad (a Pro Controller, a detached pair, a single sideways Joy-Con — all of which have sensors that were previously never asked for), and finally the console's own IMU, the one Labo VR head-tracks with ([issue #5](https://github.com/Viridite/Viridite/issues/5)).
+
+The console sensor is started but does not report yet: libnx describes its sample as ten unnamed floats and the layout is not documented anywhere checkable, so instead of guessing it logs raw samples and reads its mapping from `sdmc:/Viridite/console_imu.txt`. [docs/console-imu.md](docs/console-imu.md) is the ten-minute hardware procedure to identify it — no rebuild needed to try a mapping.
+
+Acquisition, unit conversion and the mapping parser are host-tested against a libnx HID mock in [`test/sensors/`](test/sensors/), because "which IMU did we end up on" is invisible on hardware: a game with no motion data looks exactly like a game that doesn't use motion controls.
+
 ## Knowing a title before loading it
 
 `include/compat/gamedb.h` holds what is known about each Android title this Core can be pointed at: its engine, **which of its libraries is actually the game**, and what data it needs beyond its APK — all kept strictly apart from whether it runs here (one title does; see Status above).
@@ -66,6 +74,7 @@ The load-path consequence is which library gets entered. "The largest `.so` is t
 g++ -std=c++17 -I include test/gamedb/harness.cpp -o /tmp/gamedbtest && /tmp/gamedbtest
 g++ -std=c++17 -I include test/obb/harness.cpp source/compat/obb.cpp -o /tmp/obbtest && /tmp/obbtest
 g++ -std=c++17 -I include test/jnisym/harness.cpp -o /tmp/jnisymtest && /tmp/jnisymtest
+g++ -std=c++17 -I test/sensors/mock -I include test/sensors/harness.cpp source/compat/sensors.cpp -o /tmp/sensorstest && /tmp/sensorstest
 ```
 
 The file is header-only and dependency-free because the launcher carries a byte-identical copy at `Viridite/include/gamedb.h` — the two must never disagree about a title, so keeping them in step is a file copy rather than a merge.
