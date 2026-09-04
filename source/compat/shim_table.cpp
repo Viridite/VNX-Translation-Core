@@ -4,6 +4,7 @@
 #include "compat/sensors.h"
 #include "compat/obb.h"
 #include "compat/games.h"
+#include "compat/apkcache.h"
 #include <switch.h>
 #include <GLES2/gl2.h>
 #include <GLES3/gl3.h>
@@ -50,7 +51,8 @@ static char* stub_strtok_r(char* s, const char* d, char** save) {
     return strtok(s, d);
 }
 static long stub_ftello(FILE* f) { return ftell(f); }
-static int  stub_fseeko(FILE* f, long o, int w) { return fseek(f, o, w); }
+static int  sh_fseek(FILE* f, long o, int w);
+static int  stub_fseeko(FILE* f, long o, int w) { return sh_fseek(f, o, w); }
 static int  stub_setenv(const char*, const char*, int) { return 0; }
 static int  stub_unsetenv(const char*)               { return 0; }
 static int  stub_posix_memalign(void** p, size_t a, size_t s) {
@@ -811,9 +813,54 @@ static FILE* stub_fopen(const char* path, const char* mode) {
     // syscalls for the sequential top-to-bottom access pattern decoders use
     // (libpng, asset parsers, ...). NULL buf: newlib allocates/frees it
     // itself, tied to the FILE*'s own lifetime, so no leak on fclose.
+    // The APK is the exception: the game seeks around inside it constantly, and
+    // a large stdio buffer makes that worse rather than better — every seek
+    // throws away read-ahead that was just paid for, turning a small asset read
+    // into hundreds of KB of card traffic. It gets the block cache instead.
+    if (apkcache::adopt(f, path)) {
+        setvbuf(f, nullptr, _IOFBF, 16 * 1024);
+        compatLogFmt("apkcache: caching reads from %s", path);
+        return f;
+    }
     setvbuf(f, nullptr, _IOFBF, 64 * 1024);
     return f;
 }
+// ─── Cached APK stream ───────────────────────────────────────────────────────
+// cocos2d-x reads the game's assets straight out of the .apk it was handed, and
+// minizip's access pattern — thousands of tiny reads plus a fresh walk of the
+// zip's central directory for every asset — is the worst case for an SD card,
+// where each read is an IPC round trip rather than a page-cache hit. These
+// route a cached stream through compat/apkcache.h and leave every other file
+// exactly as it was.
+static size_t sh_fread(void* p, size_t sz, size_t n, FILE* f) {
+    if (apkcache::owns(f)) return apkcache::read(f, p, sz, n);
+    return fread(p, sz, n, f);
+}
+static int sh_fseek(FILE* f, long off, int whence) {
+    if (apkcache::owns(f)) return apkcache::seek(f, (int64_t)off, whence);
+    return fseek(f, off, whence);
+}
+static long sh_ftell(FILE* f) {
+    if (apkcache::owns(f)) return (long)apkcache::tell(f);
+    return ftell(f);
+}
+static int sh_fgetc(FILE* f) {
+    if (apkcache::owns(f)) return apkcache::getc(f);
+    return fgetc(f);
+}
+static int sh_feof(FILE* f) {
+    if (apkcache::owns(f)) return apkcache::eof(f);
+    return feof(f);
+}
+static void sh_rewind(FILE* f) {
+    if (apkcache::owns(f)) { apkcache::seek(f, 0, SEEK_SET); return; }
+    rewind(f);
+}
+static int sh_fclose(FILE* f) {
+    apkcache::close(f);   // no-op unless this stream was cached
+    return fclose(f);
+}
+
 // open() wrapper — logs every call so we can trace early constructor I/O
 static int stub_open(const char* path, int flags, ...) {
     int vfd = devUrandomOpen(path);
@@ -2276,22 +2323,22 @@ static const ShimEntry g_shims[] = {
     {"vsprintf",    (void*)vsprintf},
     {"vsnprintf",   (void*)vsnprintf},
     {"fopen",       (void*)stub_fopen},
-    {"fclose",      (void*)fclose},
-    {"fread",       (void*)fread},
+    {"fclose",      (void*)sh_fclose},
+    {"fread",       (void*)sh_fread},
     {"fwrite",      (void*)sh_fwrite},
-    {"fseek",       (void*)fseek},
-    {"ftell",       (void*)ftell},
+    {"fseek",       (void*)sh_fseek},
+    {"ftell",       (void*)sh_ftell},
     {"fseeko",      (void*)stub_fseeko},
     {"ftello",      (void*)stub_ftello},
-    {"rewind",      (void*)rewind},
+    {"rewind",      (void*)sh_rewind},
     {"fflush",      (void*)sh_fflush},
-    {"feof",        (void*)feof},
+    {"feof",        (void*)sh_feof},
     {"ferror",      (void*)ferror},
     {"fgets",       (void*)fgets},
     {"fputs",       (void*)sh_fputs},
-    {"fgetc",       (void*)fgetc},
+    {"fgetc",       (void*)sh_fgetc},
     {"fputc",       (void*)sh_fputc},
-    {"getc",        (void*)getc},
+    {"getc",        (void*)sh_fgetc},
     {"putc",        (void*)putc},
     {"ungetc",      (void*)ungetc},
     {"open",        (void*)stub_open},

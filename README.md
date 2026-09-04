@@ -54,6 +54,16 @@ A cocos2d-x game exports its engine hooks as JNI long names — `Java_org_cocos2
 
 Entry points now resolve in four steps — the stock name, the `org.cocos2dx.cpp` spelling, any exported `Java_` symbol whose class and method match whatever the package (`include/compat/jnisym.h` handles the mangling, including `_1`-escaped underscores and `__signature` overloads), and finally the JNI registration table for a game that registers natives through `JNI_OnLoad` instead of exporting them. The stock name is tried first, so Hill Climb Racing resolves exactly as it did.
 
+## Reading assets out of the APK
+
+The game is handed its own `.apk` path (`nativeSetPaths`) and cocos2d-x's FileUtils reads assets straight out of it as a zip. Minizip's access pattern is the worst case for an SD card: thousands of tiny reads, and a fresh linear walk of the zip's central directory — which lives at the end of the file — every single time an asset is opened. On Android the page cache absorbs that. Here each one is a real IPC round trip to the FS sysmodule, on the render thread, while scenery streams in.
+
+`source/compat/apkcache.cpp` keeps one shared copy of the last 2MB (where the central directory is, so repeated directory walks never touch the card again) plus a small per-stream block cache for everything else. The APK also stops getting the 64KB stdio buffer every other file gets: under seek-heavy access a large buffer makes things worse, throwing away read-ahead that was just paid for.
+
+Correctness first — a cached stream keeps the real `FILE*`'s position in step with its own, so any stdio call not routed through the cache still sees the file where it should be. [`test/apkcache/`](test/apkcache/) checks transparency against the real bytes over exactly the pattern minizip produces, because a slow cache costs frames while a wrong one corrupts assets and looks like anything but a caching bug.
+
+Design credit again to [xflipperkast's HCR_NX](https://github.com/xflipperkast/HCR_NX), which identified the access pattern and the central-directory rewalk. Their version also keeps a 32MB shared LRU behind these; that is left out until there is a hardware measurement to justify spending that much of a game's memory on it.
+
 ## Hill Climb Racing's shop
 
 HCR's shop is not filled in by the game. Java fills it: at startup `NewBillingHandle.Init()` calls the game's own native `setInAppItem()` once per product — 69 times — before Google Play is contacted. Only then is there a product vector to index.
@@ -86,6 +96,7 @@ g++ -std=c++17 -I include test/obb/harness.cpp source/compat/obb.cpp -o /tmp/obb
 g++ -std=c++17 -I include test/jnisym/harness.cpp -o /tmp/jnisymtest && /tmp/jnisymtest
 g++ -std=c++17 -I test/sensors/mock -I include test/sensors/harness.cpp source/compat/sensors.cpp -o /tmp/sensorstest && /tmp/sensorstest
 g++ -std=c++17 -I test/arm32/mock -I include test/hcrshop/harness.cpp source/compat/games/game_hillclimb_shop.cpp -o /tmp/hcrshoptest && /tmp/hcrshoptest
+g++ -std=c++17 -I include test/apkcache/harness.cpp source/compat/apkcache.cpp -o /tmp/apkcachetest && /tmp/apkcachetest
 ```
 
 The file is header-only and dependency-free because the launcher carries a byte-identical copy at `Viridite/include/gamedb.h` — the two must never disagree about a title, so keeping them in step is a file copy rather than a merge.

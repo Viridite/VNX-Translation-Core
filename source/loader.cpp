@@ -15,6 +15,7 @@ void loaderSetScreenOrient(int v) { g_screen_orient = v; }
 #include "compat/obb.h"
 #include "compat/jnisym.h"
 #include "compat/games.h"
+#include "compat/apkcache.h"
 #include "build_number.h"
 #include "unity/unity_runtime.h"   // VNX-Unity-Runtime submodule
 #include "arm32/arm32.h"           // ARM32 emulation layer (armeabi-v7a games)
@@ -1046,6 +1047,10 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
             return result;
         }
     }
+
+    // The game is handed this same .apk path (nativeSetPaths) and reads its
+    // assets straight out of it, so this is the file worth caching reads from.
+    apkcache::setApkPath(apk_path.c_str());
 
     // Applied every launch (fresh or cached) so it's always current.
     applyGamePatches(pkg_name, asset_dir);

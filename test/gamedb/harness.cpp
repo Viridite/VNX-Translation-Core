@@ -136,14 +136,37 @@ int main() {
     for (size_t i = 0; i < kTitleCount; i++) {
         const Title& t = kTitles[i];
         if (!t.name || !*t.name) { check(false, "every row has a name"); break; }
-        // A row that claims an engine Viridite can drive should say what to
-        // enter; the Source rows deliberately don't, and say so by engine.
-        if (t.engine != Engine::Source && !t.entrySo) {
+        // A row the loader can actually reach — one with a package id — and
+        // whose engine Viridite can drive should say what to enter, because
+        // that is the field chooseEntrySo reads. A row marked Unsupported has
+        // no entry point to name (Adobe AIR and Dalvik keep the game's code
+        // somewhere that is not a native library; Source spreads it over
+        // thirty), and a row with no package id is reference only: nothing
+        // looks it up, so a missing entry library there misleads no one.
+        if (t.pkg && t.support != Support::Unsupported && !t.entrySo) {
             printf("  FAIL row '%s' has no entry library\n", t.name);
             g_fail++;
         }
     }
-    check(true, "every runnable row names an entry library");
+    check(true, "every matchable, drivable row names an entry library");
+
+    // The engines Viridite structurally cannot run must say so, rather than
+    // being listed as merely untried.
+    int air = 0, dalvik = 0;
+    for (size_t i = 0; i < kTitleCount; i++) {
+        if (kTitles[i].engine == Engine::AdobeAir) {
+            air++;
+            if (kTitles[i].support != Support::Unsupported)
+                { printf("  FAIL an Adobe AIR title is not marked unsupported\n"); g_fail++; }
+        }
+        if (kTitles[i].engine == Engine::Dalvik) {
+            dalvik++;
+            if (kTitles[i].support != Support::Unsupported)
+                { printf("  FAIL a Dalvik title is not marked unsupported\n"); g_fail++; }
+        }
+    }
+    check(air > 0 && dalvik > 0,
+          "the engines with no native game code to enter are recorded as such");
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
