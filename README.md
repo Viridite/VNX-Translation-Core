@@ -54,6 +54,16 @@ A cocos2d-x game exports its engine hooks as JNI long names — `Java_org_cocos2
 
 Entry points now resolve in four steps — the stock name, the `org.cocos2dx.cpp` spelling, any exported `Java_` symbol whose class and method match whatever the package (`include/compat/jnisym.h` handles the mangling, including `_1`-escaped underscores and `__signature` overloads), and finally the JNI registration table for a game that registers natives through `JNI_OnLoad` instead of exporting them. The stock name is tried first, so Hill Climb Racing resolves exactly as it did.
 
+## Hill Climb Racing's shop
+
+HCR's shop is not filled in by the game. Java fills it: at startup `NewBillingHandle.Init()` calls the game's own native `setInAppItem()` once per product — 69 times — before Google Play is contacted. Only then is there a product vector to index.
+
+Viridite runs no Dalvik bytecode, so those calls never happened and the vector stayed empty. The native builder read `items[size-1]` on it (a load from -8), and elsewhere walked the same empty vector and called a virtual method on what it found. Both were patched out at fixed addresses: the Shop opened empty instead of taking the app down, and every patch was pinned to one exact build, because that is what an address is.
+
+The cause was never the instructions — it was the 69 calls that never came. `source/compat/games/game_hillclimb_shop.cpp` makes them, in the window Android does (after `nativeSetPaths`, before `nativeInit`). The shop then works rather than merely surviving, and product ids are content rather than addresses, so the same replay serves **1.67.0 and 1.71.1** alike. The address-pinned crash patches now apply only to a build that does not export `setInAppItem` — decided at load time by looking for that name in the staged image.
+
+The catalogue, and the `gcEventDetails` server-event cache the shop loader assumes exists (synthesised as `{}` when absent, since nothing fetches it here), both come from [xflipperkast's HCR_NX](https://github.com/xflipperkast/HCR_NX), an independent Switch port that read them out of the game's own `classes2.dex`. Full credit for identifying the mechanism and recovering the data. Host-tested in [`test/hcrshop/`](test/hcrshop/) — a mistake in 69 twelve-argument calls is not a crash on hardware, it is a wrong price on a screen nobody screenshots.
+
 ## Motion sensors
 
 `ASensorManager`/`ASensorEventQueue` are implemented against the real NDK ABI and backed by a Switch six-axis sensor. Which one is no longer a single answer: acquisition walks the handheld Joy-Cons, then every connected pad (a Pro Controller, a detached pair, a single sideways Joy-Con — all of which have sensors that were previously never asked for), and finally the console's own IMU, the one Labo VR head-tracks with ([issue #5](https://github.com/Viridite/Viridite/issues/5)).
@@ -75,6 +85,7 @@ g++ -std=c++17 -I include test/gamedb/harness.cpp -o /tmp/gamedbtest && /tmp/gam
 g++ -std=c++17 -I include test/obb/harness.cpp source/compat/obb.cpp -o /tmp/obbtest && /tmp/obbtest
 g++ -std=c++17 -I include test/jnisym/harness.cpp -o /tmp/jnisymtest && /tmp/jnisymtest
 g++ -std=c++17 -I test/sensors/mock -I include test/sensors/harness.cpp source/compat/sensors.cpp -o /tmp/sensorstest && /tmp/sensorstest
+g++ -std=c++17 -I test/arm32/mock -I include test/hcrshop/harness.cpp source/compat/games/game_hillclimb_shop.cpp -o /tmp/hcrshoptest && /tmp/hcrshoptest
 ```
 
 The file is header-only and dependency-free because the launcher carries a byte-identical copy at `Viridite/include/gamedb.h` — the two must never disagree about a title, so keeping them in step is a file copy rather than a merge.

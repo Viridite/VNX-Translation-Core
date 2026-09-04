@@ -14,6 +14,7 @@ void loaderSetScreenOrient(int v) { g_screen_orient = v; }
 #include "compat/gamedb.h"
 #include "compat/obb.h"
 #include "compat/jnisym.h"
+#include "compat/games.h"
 #include "build_number.h"
 #include "unity/unity_runtime.h"   // VNX-Unity-Runtime submodule
 #include "arm32/arm32.h"           // ARM32 emulation layer (armeabi-v7a games)
@@ -62,6 +63,7 @@ extern volatile uint64_t g_recover_x8;
 static std::string g_base_dir_stored;
 static std::string g_obb_dir_stored;
 static std::string g_apk_path_stored;
+static std::string g_pkg_name_stored;
 
 // Per-APK framerate cap (0 = uncapped/default), set by the launcher's Manage
 // overlay and read here once at launch — see readFpsCap() and its use in
@@ -1324,6 +1326,7 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
     // Store paths durably so the pointers remain valid after this function returns.
     g_base_dir_stored  = base_dir;
     g_apk_path_stored  = apk_path;
+    g_pkg_name_stored  = pkg_name;
 
     ANativeActivity* act = &g_compat.activity;
     memset(&g_compat.callbacks, 0, sizeof(g_compat.callbacks));
@@ -2018,6 +2021,20 @@ void runGameOnMainThread(void* game_so_ptr,
                            insn[-3], insn[-2], insn[-1], insn[0], insn[1]); }
         }
         compatLogFlush();
+    }
+
+    // Whatever the game's Java side would have done between setting paths and
+    // starting the engine. For Hill Climb Racing that is NewBillingHandle.Init()
+    // filling the shop's product list — 69 native calls that, not being made,
+    // left the list empty and the shop crashing on it. This is the window
+    // Android does it in, so it is the window to do it in.
+    {
+        static LoadedSo* s_so = nullptr;
+        s_so = so;
+        gameBeforeNativeInit(g_pkg_name_stored.c_str(), env, obj,
+                             [](const char* sym) -> void* {
+                                 return s_so ? s_so->findSym(sym) : nullptr;
+                             });
     }
 
     typedef void (*NativeInit_fn)(JNIEnv*, jobject, jint, jint);

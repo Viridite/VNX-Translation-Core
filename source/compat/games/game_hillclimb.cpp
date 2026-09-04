@@ -17,6 +17,22 @@ bool inRange(uint64_t vaddr, uint64_t min_vaddr, size_t alloc_size) {
     return vaddr >= min_vaddr && vaddr + 4 <= min_vaddr + alloc_size;
 }
 
+// Is this NUL-terminated string anywhere in the staged image? Used to ask what
+// a build exports without a symbol table to hand: an exported name lives in
+// .dynstr, which is inside the image being staged. A plain byte search, so a
+// hit is a hit whatever section it landed in — false positives cost nothing
+// here, since the only consequence is preferring the correct fix over a patch.
+bool imageHasString(const uint8_t* base, size_t alloc_size, const char* needle) {
+    if (!base || !needle) return false;
+    const size_t n = strlen(needle);
+    if (n == 0 || alloc_size < n + 1) return false;
+    const uint8_t* end = base + alloc_size - n;
+    for (const uint8_t* p = base; p <= end; p++) {
+        if (p[0] == (uint8_t)needle[0] && memcmp(p, needle, n) == 0) return true;
+    }
+    return false;
+}
+
 // Quirk 1 — Shop/IAP crash.
 // The Google-Play shop builder populates its product vector from a store
 // backend that doesn't exist here, leaving it empty, then unconditionally reads
@@ -146,8 +162,33 @@ void patchControllerNames(uint8_t* base, uint64_t min_vaddr, size_t alloc_size) 
 void hcrApplyQuirks(const char* soname, uint8_t* stage_base,
                     uint64_t min_vaddr, size_t alloc_size) {
     (void)soname;
-    patchShopPopulate(stage_base, min_vaddr, alloc_size);
+
+    // Quirks 1 and 3 exist because the shop's product vector was empty: the 69
+    // setInAppItem() calls Android's Java side makes before the engine starts
+    // never happened here, so the builder indexed an empty vector and the only
+    // answer available was to patch the instructions that did the indexing.
+    //
+    // game_hillclimb_shop.cpp makes those calls now. With products in the
+    // vector both crashes are gone at the cause, and the patches become
+    // actively wrong: quirk 3 branches over a virtual call on a shop item,
+    // which is exactly the call that draws one. So they apply only to a build
+    // that cannot be given a catalogue.
+    //
+    // Whether it can is decided here, at load time, by looking for the name of
+    // the native the replay calls. It is in .dynstr if the build exports it,
+    // and searching the staged image for it needs nothing plumbed through from
+    // the loader.
+    const bool canPopulateShop = imageHasString(
+        stage_base, alloc_size, "Java_com_fingersoft_game_MainActivity_setInAppItem");
+
+    if (canPopulateShop) {
+        compatLog("quirk[HCR]: shop crash patches skipped — this build exports "
+                  "setInAppItem, so the product list gets filled properly instead");
+    } else {
+        patchShopPopulate(stage_base, min_vaddr, alloc_size);
+        patchShopItemVirtualCall(stage_base, min_vaddr, alloc_size);
+    }
+
     patchSkinLookupGuard(stage_base, min_vaddr, alloc_size);
-    patchShopItemVirtualCall(stage_base, min_vaddr, alloc_size);
     patchControllerNames(stage_base, min_vaddr, alloc_size);
 }

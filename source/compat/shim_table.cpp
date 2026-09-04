@@ -3,6 +3,7 @@
 #include "compat/android.h"
 #include "compat/sensors.h"
 #include "compat/obb.h"
+#include "compat/games.h"
 #include <switch.h>
 #include <GLES2/gl2.h>
 #include <GLES3/gl3.h>
@@ -785,7 +786,24 @@ static FILE* stub_fopen(const char* path, const char* mode) {
         // failure line rather than being swallowed by ours.
     }
     FILE* f = fopen(path, mode);
-    if (!f) { compatLogFmt("fopen FAIL: %s (mode=%s)", path ? path : "?", mode ? mode : "?"); return f; }
+    if (!f) {
+        // Some files a game reads are written for it before it runs — by a
+        // backend fetch, or by Java. Nothing here does that, so the read fails
+        // on a file the game is entitled to assume exists. Only consulted after
+        // a real open has already failed, so nothing real is ever shadowed.
+        if (path && mode && mode[0] == 'r') {
+            if (const char* content = gameMissingFileContent(g_obb_pkg.c_str(), path)) {
+                if (FILE* nf = fopen(path, "w+")) {
+                    fputs(content, nf);
+                    rewind(nf);
+                    compatLogFmt("synthesized missing file %s (%s)", path, content);
+                    return nf;
+                }
+            }
+        }
+        compatLogFmt("fopen FAIL: %s (mode=%s)", path ? path : "?", mode ? mode : "?");
+        return f;
+    }
     // Default newlib stdio buffer is small (~1KB), so reading a single
     // texture PNG off the SD card means dozens of small reads — each one a
     // real IPC round-trip to the FS sysmodule, not free like a page-cached

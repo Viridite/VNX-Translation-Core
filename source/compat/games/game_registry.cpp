@@ -28,6 +28,29 @@ void gameApplyQuirks(const char* pkg, const char* soname,
         hcrApplyQuirks(soname, stage_base, min_vaddr, alloc_size);
 }
 
+void gameBeforeNativeInit(const char* pkg, void* env, void* thiz,
+                          HcrSymResolver resolve) {
+    if (pkg && strcmp(pkg, "com.fingersoft.hillclimb") == 0)
+        hcrPopulateShop(env, thiz, resolve);
+}
+
+const char* gameMissingFileContent(const char* pkg, const char* path) {
+    if (!pkg || !path) return nullptr;
+    if (strcmp(pkg, "com.fingersoft.hillclimb") != 0) return nullptr;
+
+    const char* base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+
+    // The offline Android build writes this server-event cache before the shop
+    // is ever opened, and the native shop loader assumes it is there. Nothing
+    // fetches it here, so it never exists — and an empty JSON object is the
+    // game's own no-events answer, which is the truthful one on a console with
+    // no Fingersoft backend behind it. Identified by xflipperkast's HCR_NX
+    // (https://github.com/xflipperkast/HCR_NX).
+    if (strcmp(base, "gcEventDetails") == 0) return "{}";
+    return nullptr;
+}
+
 int gameMarketVariation(const char* pkg) {
     const gamedb::Title* t = gamedb::findByPackage(pkg);
     return t ? t->marketVariation : -1;
